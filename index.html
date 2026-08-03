@@ -222,60 +222,6 @@ function framesToSeconds(f){ return f / FPS; }
 function mPerFrameToPxPerSec(v){ return duPerFrameToPxPerSec(v * DU_PER_METER); }
 
 // --------------------------------------------------------------------------
-// 塗りポイントの単位系（グリッド定義）。ゲーム内の面積↔ポイント換算はここで
-// 一度だけ定義し、WEAPONS側の着弾塗り半径はこれを基準に算出する（後段の
-// tickPaintPoints()もこの同じ定数を参照する。値そのものは以下の通り）:
-//   - イカ1人の身長は約3ユニット(約1.5m)と設定されている → 1ユニット=0.5m
-//   - 床は1ユニット×1ユニット(50cm×50cm)の正方形グリッドに細分化されている
-//   - このマス1枚を100%塗りつぶすと25塗りポイントが手に入る
-//   - つまりゲーム内の最小単位=1ポイントは、1マスの1/25(=4%)の面積を
-//     インクで埋めたときにシステムがカウントする値
-// UNITS_PER_LINEは既に定義済みの「1ライン=5m」スケールを介して求める
-// （1ユニット=0.5m → 1ライン=10ユニット）。よって1マスの面積は
-// (1/10)^2 = 0.01 line^2、POINTS_PER_LINE_SQUARED = 25pt / 0.01 line^2。
-// --------------------------------------------------------------------------
-const METERS_PER_UNIT = 0.5;            // 1ユニット = 50cm（イカの身長 約3ユニット=約1.5mの設定より）
-const UNITS_PER_LINE = METERS_PER_LINE / METERS_PER_UNIT; // 5m / 0.5m = 10ユニット/ライン
-const TILE_AREA_LINE_SQUARED = (1 / UNITS_PER_LINE) ** 2;  // 1ユニット×1ユニットのマス面積(ライン^2) = 0.01
-const POINTS_PER_TILE_FULL = 25;        // 1マスを100%塗りつぶした時の獲得ポイント
-const POINTS_PER_LINE_SQUARED = POINTS_PER_TILE_FULL / TILE_AREA_LINE_SQUARED; // = 2500 pt/line^2
-
-// 着弾塗り半径をブキの「単発塗りポイント」から逆算するヘルパー。
-// 着弾塗りは中心が濃く縁が薄い円ではなく単純な円としてモデル化しているので、
-// 面積 = points / POINTS_PER_LINE_SQUARED、半径 = sqrt(面積 / π) という円の
-// 面積の式をそのまま逆に使う。
-// wiki記載の着弾塗り半径(rawStartRadius→rawEndRadius、着弾距離による減衰)は
-// 半径の「形」（近距離ほど大きく、遠距離ほど小さくなる比率）としては維持
-// しつつ、全体のスケールだけをこの関数で単発塗りポイントに一致するよう
-// 縮尺し直す（旧来は逆に「着弾塗り半径の平均値→ポイント」の方向で1ブキ分
-// (スプラシューター)から比例定数を逆算していたが、今回はポイント側を基準
-// 事実として全ブキの半径をそこから導出する）。
-//
-// この縮尺(scale)は着弾splatだけでなく、足元塗り(footPaintRadiusLines)・
-// 中間塗り(midPaintRadiusLines)にも同じ値を使う必要がある。塗りポイントは
-// coverageLayerに描かれた全ての塗り（着弾splat・足元塗り・中間塗り）の面積を
-// 同じPOINTS_PER_LINE_SQUARED換算レートで数えるため、着弾splatだけを
-// 縮尺して他を旧スケールのまま放置すると、旧スケールの半径×新しい(大きい)
-// 換算レートという組み合わせになり、足元塗り・中間塗りの獲得ポイントが
-// 桁違いに膨れ上がってしまう（実測：footPaint半径0.41lineのまま2500pt/line^2
-// を適用すると1個で約1320pt）。そのためscaleを関数として切り出し、
-// WEAPONSの各エントリでfootPaintRadiusLines・midPaintRadiusLinesにも
-// 明示的に掛け直している。
-function weaponPaintScale(singleShotPaintPoints, rawStartRadius, rawEndRadius){
-  const rawAvgRadius = (rawStartRadius + rawEndRadius) / 2;
-  const targetAvgRadius = Math.sqrt((singleShotPaintPoints / POINTS_PER_LINE_SQUARED) / Math.PI);
-  return targetAvgRadius / rawAvgRadius;
-}
-
-function splatRadiusFalloffFromScale(scale, startDist, rawStartRadius, endDist, rawEndRadius){
-  return {
-    startDist, endDist,
-    startRadius: rawStartRadius * scale,
-    endRadius: rawEndRadius * scale,
-  };
-}
-
-// --------------------------------------------------------------------------
 // 重量級カテゴリ別のデフォルト移動速度（ブキ非依存）。
 // 非射撃時ヒト速は「50DU(=1ライン=5m)移動にかかる秒数」として検証されている
 // ため、DU/Fへの変換ヘルパーを用意する。
@@ -284,11 +230,8 @@ function splatRadiusFalloffFromScale(scale, startDist, rawStartRadius, endDist, 
 // 全カテゴリで分離データが確認できたため、旧来の「軽量級・重量級は暫定的に
 // 単一値を流用」という扱いは撤廃した）:
 //   軽量級: ヒト速2.40s／イカ速(オフインク)3.45s／イカ速(オンインク)1.30s
-//   中量級: ヒト速2.60s／イカ速(オフインク)3.45s／イカ速(オンインク)1.30s（詳細後述）
+//   中量級: ヒト速2.60s／イカ速(オフインク)3.45s／イカ速(オンインク)1.40s
 //   重量級: ヒト速2.80s／イカ速(オフインク)3.45s／イカ速(オンインク)1.50s
-// 中量級のオンインク値は、スプラシューター(中量級)のwiki実測値
-// 「イカ速:1.92」との突き合わせにより1.40s→1.30sへ修正済み（下のconst
-// WEIGHT_CLASS_STATS直前のコメントに詳細）。
 // オフインクのイカ速はどの重量級カテゴリでも同一（3.45s/3ライン）という
 // 実測値だった点に注意——重量級間で差がつくのはヒト速とオンインクのイカ速のみ。
 // 射撃時ヒト速はブキ固有のデータなのでここには含めず、各WEAPONSエントリの
@@ -301,25 +244,11 @@ function lineSecondsToDuPerFrame(seconds){ return DU_PER_LINE / (seconds * FPS);
 // に合わせるため、3ラインの実測秒数を3で割った「1ラインあたり秒」を渡す）。
 function threeLineSecondsToDuPerFrame(seconds){ return (3 * DU_PER_LINE) / (seconds * FPS); }
 
-// 軽量級: ヒト速2.40s／イカ速(オフインク)3.45s／イカ速(オンインク)1.30s
-//   中量級: ヒト速2.60s／イカ速(オフインク)3.45s／イカ速(オンインク)1.30s
-//   重量級: ヒト速2.80s／イカ速(オフインク)3.45s／イカ速(オンインク)1.50s
-// 中量級のオンインク値は元々1.40sとしていたが、スプラシューター(中量級)の
-// wiki実測値「イカ速:1.92」と突き合わせたところ1.7857にしかならず不一致
-// だったため、1.92に一致する1.3021s(≈1.30s)に修正した。結果的に軽量級と
-// 同じ1.30sになったが、軽量級側はこの検証の対象外（軽量級ブキのwikiページ
-// でまだ裏取りできていない）なので、偶然の一致か本来同じ値なのかは未確認。
 const WEIGHT_CLASS_STATS = {
   '軽量級': { walkSeconds50DU: 2.40 / 3, swimOnInkDU: threeLineSecondsToDuPerFrame(1.30), swimOffInkDU: threeLineSecondsToDuPerFrame(3.45) },
-  '中量級': { walkSeconds50DU: 2.60 / 3, swimOnInkDU: threeLineSecondsToDuPerFrame(1.30), swimOffInkDU: threeLineSecondsToDuPerFrame(3.45) },
+  '中量級': { walkSeconds50DU: 2.60 / 3, swimOnInkDU: threeLineSecondsToDuPerFrame(1.40), swimOffInkDU: threeLineSecondsToDuPerFrame(3.45) },
   '重量級': { walkSeconds50DU: 2.80 / 3, swimOnInkDU: threeLineSecondsToDuPerFrame(1.50), swimOffInkDU: threeLineSecondsToDuPerFrame(3.45) },
 };
-
-// 各ブキの単発塗りポイントから導く縮尺(weaponPaintScale)。着弾splat・
-// 足元塗り・中間塗りの半径すべてに同じ値を使うことで、coverageLayer上の
-// どの塗りもPOINTS_PER_LINE_SQUARED基準の面積↔ポイント換算と整合させる。
-const SPLASH_SHOOTER_PAINT_SCALE = weaponPaintScale(4.0, 0.39, 0.34);   // スプラシューター 単発塗り4.0p基準
-const WAKABA_SHOOTER_PAINT_SCALE = weaponPaintScale(4.5, 0.42, 0.15);   // わかばシューター 単発塗り4.5p基準
 
 // --------------------------------------------------------------------------
 // Weapon data — スプラシューター only, for now, using verified frame-accurate
@@ -337,6 +266,14 @@ const WEAPONS = [
     paintRangeLines: 3.4,     // 塗り射程 — average crab-walking paint reach; descriptive only, not used by the sim (塗りPT comes from actual splats)
     fireIntervalSec: framesToSeconds(6),  // 連射フレーム 6F = 0.100s exactly
     inkPerShot: 100 / 108,                // インク消費量 0.92%（装弾数108発）
+    // 単発塗りポイント: 地面と並行に1発ずつ射撃して得られた塗りポイントの
+    // 平均を、ナワバリバトルの塗りポイントカウンターを用いて算出した公称値。
+    // 現在の塗りポイントは「ブキ固有の単発塗りポイント」を経由しない実面積
+    // 比例の共通換算方式(POINTS_PER_LINE_SQUARED、tickPaintPoints()参照)を
+    // 採用しているため計算には使わないが、シミュレーションが実際にこの値へ
+    // どれだけ近づくか（地面と並行に単発撃ちしてHUDの塗りポイント増分を見る）
+    // を検証するための参照値として保持しておく。
+    singleShotPaintPoints: 4.0,
     speedDU: 22.66,                       // 初速 (initial shot speed, DU/F)
     shootMoveSpeedDU: 0.72,               // 射撃時ヒト速 — ブキ固有データ（重量級カテゴリ非依存）
     directFrames: 4,                      // 直進フレーム — flies straight at full speed for this many frames, then decelerates
@@ -380,15 +317,9 @@ const WEAPONS = [
     // 必要がある（hitDummy/hitWall内で /2 している）。
     projectileSizeEnemyLines: 0.114,
     projectileSizeTerrainLines: 0.08,
-    // 単発塗りポイント: wikiで検証されているこのブキの1発あたり獲得ポイント。
-    // 塗りポイントのグリッド定義(POINTS_PER_LINE_SQUARED)を基準事実として
-    // 採用したので、着弾塗り半径はこの値から逆算する（下記参照）。
-    singleShotPaintPoints: 4.0,
-    // 着弾塗り半径: wiki記載の生の値(0.39→0.34 line、着弾距離0.22→4.00 line
-    // で減衰)を「形」（近距離ほど大きい falloff の比率）として使い、
-    // SPLASH_SHOOTER_PAINT_SCALEで単発塗りポイント4.0pに一致するよう
-    // 全体スケールを縮尺し直したものを実際の値として採用する。
-    splatRadiusFalloff: splatRadiusFalloffFromScale(SPLASH_SHOOTER_PAINT_SCALE, 0.22, 0.39, 4.00, 0.34),
+    // 着弾塗り半径: shrinks slightly from 0.39 to 0.34 lines as impact
+    // distance goes from 0.22 to 4.00 lines.
+    splatRadiusFalloff: { startDist: 0.22, startRadius: 0.39, endDist: 4.00, endRadius: 0.34 },
     // 着弾塗りの前方伸び率: the landing splat extends forward (in the shot's
     // flight direction) past the impact point by up to this multiple of its
     // radius; the multiplier shrinks with impact distance, same distance
@@ -401,17 +332,11 @@ const WEAPONS = [
     // this one where the interval is a fixed integer (4), that logic just
     // reduces to "every 4th shot" — so it doubles as the general case that
     // also covers わかばシューター's alternating "3→4発毎" interval below.
-    footPaintAvgInterval: 4,   // 4発毎（22F毎）
-    // 半径: wiki実測値通り0.41 lineをそのまま採用（自身[player.x, player.y]
-    // を中心に発生させる — 発火箇所はfireShot()内のpaintSplatClipped
-    // (player.x, player.y, ...)呼び出し）。
-    // 注意: 前回SPLASH_SHOOTER_PAINT_SCALEで縮小していたのは、この生の
-    // 半径のままだと塗りポイントカウンターが1個あたり約1320pt
-    // (0.41^2*π*2500pt/line^2)も加算されてしまうため。今回0.41に戻した
-    // ことで、連射中は再びこの分だけ塗りポイントが跳ね上がる状態に戻る
-    // （単発塗りポイント4.0pの検証は「1発ずつ単発で撃つ」測定なので
-    // burstShotCountが毎回リセットされ足元塗りは発生せず、その測定値
-    // 自体とは矛盾しないが、連射中のスコア表示は跳ねる）。
+    // 資料には「4発毎（22F毎）」という補足があるが、連射F(6F)×4発=24Fとは
+    // 2Fの差異がある（前隙等の詳細タイミングは未モデル化のため要因不明）。
+    // 現状のfootPaintAvgIntervalは発数ベースのロジックなので「4発毎」の方を
+    // 採用し、22Fという時間情報は参考として残すのみで計算には使わない。
+    footPaintAvgInterval: 4,
     footPaintRadiusLines: 0.41,
     // 中間塗り: extra blobs along the flight path between player and impact,
     // spaced every 1.84 lines. The wiki's documented rule: each weapon has a
@@ -424,9 +349,7 @@ const WEAPONS = [
     // along a given shot's (possibly short) travel distance.
     midPaintIntervalLines: 1.84,
     midPaintAvgPerShot: 1.5,
-    // 半径: wiki生値0.29 lineにSPLASH_SHOOTER_PAINT_SCALEを掛けたもの（理由は
-    // footPaintRadiusLinesと同じ）。
-    midPaintRadiusLines: 0.29 * SPLASH_SHOOTER_PAINT_SCALE,
+    midPaintRadiusLines: 0.29,
   },
   {
     name: 'わかばシューター',
@@ -448,9 +371,20 @@ const WEAPONS = [
     speedDU: 22.66,                       // 初速
     shootMoveSpeedDU: 0.76,               // 射撃時ヒト速
     directFrames: 3,                      // 直進フレーム 3F
-    // 減速状態・自由落下状態の詳細パラメータは未検証（wiki未記載）なので、
-    // ここでは意図的に設定しない。stepProjectilePhysics()側のフォールバック
-    // （簡易指数減衰 DECAY_RATE_PER_FRAME_FALLBACK）がそのまま使われる。
+    // 減速状態・自由落下状態のパラメータ: 「ブキ種ごとの設定値一覧」表より、
+    // これらの値はスプラシューター固有ではなく「シューター種」共通の実測値
+    // であることが判明したため、同じシューター種であるわかばシューターにも
+    // 正式に設定する。以前は「未検証」としてstepProjectilePhysics()側の
+    // フォールバック（簡易指数減衰）に頼っていたが、指数減衰は理論上いつまで
+    // も速度が0に収束しきらず、射程が収束値ギリギリだと着弾判定が成立しない
+    // まま弾が残り続ける（画面に白玉が残る）ことがあったため、これが根本的な
+    // 修正になる。
+    decelAirResistXZ: 0.36,   // 減速時の空気抵抗 (D)　シューター種共通
+    decelGravityY: 0.07,      // 減速時の重力 (E) [m/F^2]　シューター種共通
+    decelFloorXZ_mF: 0.2355,  // 減速状態の下限XZ速度 (F) [m/F]　シューター種共通
+    decelFloorY_mF: -0.15,    // 減速状態の下限Y速度 (F) [m/F]　シューター種共通
+    freefallAirResistXZ: 0.02, // 自由落下時の空気抵抗 (G)　シューター種共通
+    freefallGravityY: 0.016,   // 自由落下時の重力 (H) [m/F^2]　シューター種共通
     spreadDeg: 11.66,                     // 拡散
     jumpSpreadDeg: 14.58,                 // ジャンプ中拡散
     jumpShotBiasDeg: 5.832,               // ジャンプ撃ち補正
@@ -469,14 +403,7 @@ const WEAPONS = [
     },
     projectileSizeEnemyLines: 0.12,
     projectileSizeTerrainLines: 0.08,
-    // 単発塗りポイント: wikiで検証されているこのブキの1発あたり獲得ポイント
-    // （スプラシューターの4.0pより高い＝低火力ブキだが塗り性能で差別化されて
-    // いる、というブキ間バランスがそのまま反映される）。
-    singleShotPaintPoints: 4.5,
-    // 着弾塗り半径: wiki記載の生の値(0.42→0.15 line)を falloff の「形」として
-    // 使い、WAKABA_SHOOTER_PAINT_SCALEで単発塗りポイント4.5pに一致する
-    // よう全体スケールを縮尺し直したものを実際の値として採用する。
-    splatRadiusFalloff: splatRadiusFalloffFromScale(WAKABA_SHOOTER_PAINT_SCALE, 0.22, 0.42, 4.00, 0.15),
+    splatRadiusFalloff: { startDist: 0.22, startRadius: 0.42, endDist: 4.00, endRadius: 0.15 },
     stretchFalloff: { startDist: 0.22, startRatio: 2.62, endDist: 4.00, endRatio: 1.12 },
     // 足元塗り間隔:3→4発毎。固定間隔ではなく3発と4発を行き来する可変間隔
     // なので、中間塗りと同じ「平均値をfloor(n/avg)で累積判定する」ロジック
@@ -484,13 +411,10 @@ const WEAPONS = [
     // パターンを再現する（スプラシューターのfootPaintAvgInterval:4は
     // この仕組みの特殊ケースとして同じ関数で扱える）。
     footPaintAvgInterval: 3.5,
-    // 半径: wiki生値0.42 lineにWAKABA_SHOOTER_PAINT_SCALEを掛けたもの
-    // （理由はスプラシューター側と同じ — 未縮小のまま残すと塗りポイントが
-    // 桁違いに膨れ上がる）。
-    footPaintRadiusLines: 0.42 * WAKABA_SHOOTER_PAINT_SCALE,
+    footPaintRadiusLines: 0.42,
     midPaintIntervalLines: 1.9,
     midPaintAvgPerShot: 1.4,
-    midPaintRadiusLines: 0.30 * WAKABA_SHOOTER_PAINT_SCALE,
+    midPaintRadiusLines: 0.30,
   },
 ];
 let currentWeaponIndex = 0; // switchable via switchWeapon() / weapon-switch buttons
@@ -1133,6 +1057,17 @@ function updateProjectiles(dt){
     const hitWall = OBSTACLES.some(o => rectsOverlap(nx, ny, projRadiusTerrainPx, o));
     const outOfRange = p.traveled >= p.range;
     const outOfBounds = nx < 0 || nx > W || ny < 0 || ny > H;
+    // 失速判定: わかばシューターにも正式な減速・自由落下パラメータ（シューター
+    // 種共通値）を設定したため、現状の2ブキではこの判定はほぼ発火しない。
+    // ただし今後、減速・自由落下パラメータが未検証のブキを追加した場合は
+    // stepProjectilePhysics側が簡易指数減衰(毎F×0.75)にフォールバックし、
+    // 指数減衰は理論上いつまでも0になりきらないため、targetRangeが収束値
+    // ギリギリのときoutOfRange判定が成立しないまま弾が生き続けてしまう
+    // （＝画面に薄い"白玉"が消えずに居座るバグ）ことがある。速度が実用上
+    // ゼロとみなせるところまで落ちたら、その場に着弾したものとして強制的に
+    // 解決する保険として残しておく。
+    const STALL_SPEED_PX_PER_SEC = 4;
+    const stalled = p.xzSpeed < STALL_SPEED_PX_PER_SEC;
     const splatRadius = getSplatRadius(weapon, toLines(p.traveled));
     const dirAngle = Math.atan2(p.dirY, p.dirX);
     const stretch = getStretchRatio(weapon, toLines(p.traveled));
@@ -1148,7 +1083,7 @@ function updateProjectiles(dt){
       paintSplatClipped(nx, ny, splatRadius, dirAngle, stretch);
       paintMidDots(weapon, p.startX, p.startY, nx, ny, p.burstShotIndex);
       p.alive = false;
-    } else if (hitWall || outOfRange || outOfBounds) {
+    } else if (hitWall || outOfRange || outOfBounds || stalled) {
       const landX = Math.min(Math.max(nx, 0), W);
       const landY = Math.min(Math.max(ny, 0), H);
       paintSplatClipped(landX, landY, splatRadius, dirAngle, stretch);
@@ -1260,14 +1195,19 @@ function updatePlayer(dt){
 // unpainted -> painted count as "new" area, so already-painted ground adds
 // nothing even if a fresh splat lands on top of it.
 //
-// Converting that newly-painted pixel count into points uses
-// POINTS_PER_LINE_SQUARED (2500 pt/line^2), defined earlier near WEAPONS
-// from the game's documented unit-grid definition — 1 unit = 50cm, a tile is
-// 1 unit x 1 unit, and fully painting one tile is worth 25 points — so that
-// each weapon's splatRadiusFalloff can be derived from that same constant
-// (see weaponPaintScale() / splatRadiusFalloffFromScale()) and the turf-score readout here stays
-// consistent with the per-shot point values used to size those splats.
+// 換算係数(POINTS_PER_LINE_SQUARED)について:
+// 以前はスプラシューターの公称「単発塗りポイント(4.0p)」から着弾塗り半径の
+// 平均値を使って面積を逆算し、そこから1ライン²あたりのpt数を導出していた。
+// しかし今回、ユーザーがゲーム内で実際に計測した結果、スプラ3の塗り量は
+// 「ブキの単発塗りポイント」経由の推定に頼らずとも、ほぼ実面積に比例して
+// いる可能性が高いという実測ベースの暫定値が得られたため、そちらに全面的
+// に切り替える。
+//   1p ≒ 0.1265 ライン²　（1ライン² ≒ 7.9p、100ライン² ≒ 約790p）
+// この値は「間を取った」暫定値であり、ユーザーの実測に基づくものの、まだ
+// 確定情報ではない（変更の可能性あり）。ブキ固有の単発塗りポイントを経由
+// しないため、新しいブキを追加してもこの定数は一切調整不要になる。
 // --------------------------------------------------------------------------
+const POINTS_PER_LINE_SQUARED = 1 / 0.1265; // 1p ≒ 0.1265 line²（実測・暫定値） ≒ 7.905 pt/line²
 const LINE_AREA_PER_SAMPLE_PIXEL = toLines(W / 100) * toLines(H / Math.round(100 * (H / W)));
 
 const sampleCanvas = document.createElement('canvas');
@@ -1309,8 +1249,7 @@ function updateWeaponDisplay(){
     `有効射程 ライン${w.rangeLines} ／ 確定数維持射程 ライン${w.confirmedKillRangeLines} ／ ` +
     `連射${(w.fireIntervalSec * FPS).toFixed(0)}F(${w.fireIntervalSec.toFixed(3)}s) ／ ` +
     `ダメージ ${w.damageFalloff.startDamage}→${w.damageFalloff.endDamage} ／ ` +
-    `インク消費${(w.inkPerShot).toFixed(2)}%${capNote} ／ ` +
-    `単発塗り${w.singleShotPaintPoints.toFixed(1)}p`;
+    `インク消費${(w.inkPerShot).toFixed(2)}%${capNote}`;
 }
 
 // 武器切り替えボタンをWEAPONSから動的に生成し、現在選択中のブキに
