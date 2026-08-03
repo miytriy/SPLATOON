@@ -92,6 +92,12 @@
         <div id="weapon-stats" style="font-size:11px; color:var(--muted); margin-top:2px;">–</div>
         <div id="dummy-status" style="font-size:11px; margin-top:6px; color:var(--accent);">–</div>
         <div id="hit-probability" style="font-size:11px; margin-top:4px; color:var(--accent);">–</div>
+        <div id="charge-wrap" style="display:none; margin-top:6px;">
+          <div id="coverage-label">チャージ</div>
+          <div id="charge-gauge-outer" style="width:140px; height:8px; border-radius:4px; background:#0b0c10; overflow:hidden; margin-top:4px; border:1px solid #33384a;">
+            <div id="charge-gauge-inner" style="height:100%; width:0%; background: linear-gradient(90deg, var(--accent), #fff); transition: width .05s linear;"></div>
+          </div>
+        </div>
       </div>
       <div class="card" style="text-align:right">
         <div id="coverage-label">インク残量</div>
@@ -102,7 +108,7 @@
   </div>
   <div id="footer">
     <div><kbd>W A S D</kbd> 移動</div>
-    <div><kbd>マウス</kbd> 照準　<kbd>左クリック(長押し)</kbd> 発射(ヒト状態のみ)</div>
+    <div><kbd>マウス</kbd> 照準　<kbd>左クリック(長押し)</kbd> 発射／チャージャーはチャージして離すと発射(ヒト状態のみ)</div>
     <div><kbd>右クリック(長押し)</kbd> イカ状態(左クリック無効・自陣インク上で急速回復)</div>
     <div><kbd>Shift(長押し)</kbd> 照準ロック(カニ歩き)</div>
     <div><kbd>R</kbd> リセット</div>
@@ -416,6 +422,66 @@ const WEAPONS = [
     midPaintAvgPerShot: 1.4,
     midPaintRadiusLines: 0.30,
   },
+  // --------------------------------------------------------------------------
+  // リッター4K — シューター種とは別の「チャージャー種」。左クリックを押し
+  // 続けるとチャージが溜まり(chargeFrames)、離すと現在のチャージ量に応じた
+  // 威力・射程・初速・インク消費で1発だけ即着弾(ヒットスキャン)の弾を撃つ。
+  // フルチャージ(chargeFraction>=1)は99%チャージ地点までの値と別枠の値へ
+  // 不連続にジャンプする(ダメージ40.0→79.9の直線的な伸びとは別に、フル
+  // チャージでいきなり180.0になる、というのが実際のゲームの仕様)。
+  //
+  // 補足(実装上の単純化・注意点 — わからない/確認できなかった点):
+  //  - 射程・塗り射程・初速は「ノーチャージ〜半チャージ(99%)」の区間で線形
+  //    補間し、半チャージ最大値=フルチャージ値と資料に明記されている項目
+  //    (射程・塗り射程)はそのまま同じ値をフルチャージ側にも使っている。
+  //    初速はフルチャージのみ別枠(63.9→96.0への不連続ジャンプ)として扱った。
+  //  - ダメージ・インク消費量・単発塗りポイントは「ノーチャージ→半チャージ
+  //    最大(99%)」を線形補間し、フルチャージ(100%)でだけ別枠の値に切り替える
+  //    実装にした。インク消費量は資料に半チャージ最大値の明記がなかったため、
+  //    フルチャージの25%に向けて99%地点まで線形に近づける近似にしている
+  //    (「インク消費増加/秒:16.25%/秒」等の秒間増加量はチャージ時間の刻み方
+  //    が不明だったため今回は使わず、チャージ進捗の割合で直接補間した)。
+  //  - 軌跡塗り(横半径・縦半径・発生数)や着弾先端塗り半径は、資料に半チャージ
+  //    最大値の区切りがなかったため、ノーチャージ→フルチャージへ chargeFraction
+  //    (0〜1)でそのまま連続的に線形補間している。
+  //  - チャージキープ(イカ状態でチャージしたまま保持する仕様)は今回は未実装。
+  //    このプロトタイプは既存のシューター群と同じく「左クリック＝ヒト状態限定」
+  //    という制約を踏襲しており、イカ状態中はチャージ操作自体を無効化して
+  //    いる。実装してほしければ教えてほしい。
+  //  - チャージ前隙・後隙・連射フレーム(フルチャージ後98F/ノーチャージ後14F)
+  //    は「次のチャージを開始できるまでのクールダウン」として実装し、
+  //    フルチャージ状態からノーチャージ状態まで chargeFraction に応じて
+  //    線形補間したフレーム数を使っている(資料には中間チャージのクール
+  //    ダウンF数が明記されていなかったため近似)。
+  // --------------------------------------------------------------------------
+  {
+    name: 'リッター4K',
+    type: 'charger',
+    weightClass: '重量級',
+    chargeFrames: 92,                 // フルチャージ時間 92F(1.533s)
+    chargeSlowdownMultiplier: 3,      // インク不足時のチャージ時間倍率(×3=チャージ速度1/3)
+    fullChargeRecoveryFrames: 98,     // 連射フレーム(フルチャージ発射後)
+    noChargeRecoveryFrames: 14,       // 連射フレーム(ノーチャージ発射後)
+    rangeLinesNoCharge: 2.3, rangeLinesFull: 6.2,             // 射程
+    paintRangeLinesNoCharge: 3.1, paintRangeLinesFull: 6.7,   // 塗り射程
+    speedDUNoCharge: 24.0, speedDUHalfChargeMax: 63.9, speedDUFull: 96.0, // 初速
+    damageNoCharge: 40.0, damageHalfChargeMax: 79.9, damageFull: 180.0,   // ダメージ
+    inkPerShotNoCharge: 2.25, inkPerShotFull: 25,             // インク消費量(%)
+    singleShotPaintPointsNoCharge: 6.6, singleShotPaintPointsFull: 32,    // 単発塗りポイント(参考値、計算には未使用)
+    chargeMoveSpeedDUNoCharge: 0.88, chargeMoveSpeedDUFull: 0.16, // チャージ中のヒト移動速度
+    postFullChargeMoveSpeedDU: 0.15,  // フルチャージ保持中(発射前)のヒト移動速度
+    chargePreDelayHumanoidFrames: 1,  // チャージ前隙(ヒト)
+    chargePreDelaySquidFrames: 6,     // チャージ前隙(イカ) — 未実装(イカ中はチャージ不可)
+    chargeKeepDurationFrames: 75,     // チャージキープ持続時間 — 未実装
+    footPaintRadiusLines: 0.24,       // 足元塗り半径(発射のたび毎回発生)
+    projectileSizeEnemyLines: 0.045,
+    projectileSizeTerrainLines: 0.008,
+    trailRadiusHorizontalNoCharge: 0.19, trailRadiusHorizontalFull: 0.37, // 軌跡塗りの横半径
+    trailRadiusVerticalNoCharge: 0.65, trailRadiusVerticalFull: 0.37,    // 軌跡塗りの縦半径(進行方向)
+    trailDropCountNoCharge: 3, trailDropCountFull: 13,        // 軌跡塗り発生数
+    trailTipRadiusMultiplier: 1.5,    // 軌跡塗りの先端(着弾直前の一粒)の半径倍率
+    tipSplatRadiusNoCharge: 0.21, tipSplatRadiusFull: 0.77,   // 着弾時の先端塗り半径
+  },
 ];
 let currentWeaponIndex = 0; // switchable via switchWeapon() / weapon-switch buttons
 
@@ -443,6 +509,10 @@ const player = {
   swimRegenRate: 32,      // ink/sec — イカ状態かつ自陣インク上のときだけこちら（急速回復）
   isSwimming: false,      // 自陣インクの上に乗っているか（フォームとは独立の判定）
   form: 'human',          // 'human' | 'squid' — デフォルトはヒト状態
+  // --- チャージャー種(リッター4K)用のチャージ状態 ---
+  chargeFramesElapsed: 0,  // 現在溜まっているチャージのフレーム数(0〜weapon.chargeFrames)
+  charging: false,         // 左クリックを押し続けてチャージ中か
+  chargeCooldownFramesLeft: 0, // 発射後、次のチャージを開始できるまでの残りフレーム数
 };
 
 // 装備中のブキのweightClass（非射撃時ヒト速・イカ速×2種）とshootMoveSpeedDU
@@ -475,8 +545,13 @@ function switchWeapon(index){
   applyWeaponSpeeds();
   resetBiasState();
   burstShotCount = 0;
+  player.charging = false;
+  player.chargeFramesElapsed = 0;
+  player.chargeCooldownFramesLeft = 0;
   updateWeaponDisplay();
   updateWeaponSwitchButtons();
+  const chargeWrapEl = document.getElementById('charge-wrap');
+  chargeWrapEl.style.display = WEAPONS[currentWeaponIndex].type === 'charger' ? 'block' : 'none';
 }
 
 
@@ -550,6 +625,12 @@ window.addEventListener('mouseup', e => {
     // 足元塗り・中間塗りのパターンは「連射し続けている間」の射撃回数を基準に
     // 進む固定パターンなので、トリガーを離したらカウントをリセットする。
     burstShotCount = 0;
+    // チャージャー種はここが「離した瞬間」＝発射トリガー。チャージ0なら
+    // 何も起きない(fireChargerShot側でガードする)。
+    const weapon = WEAPONS[currentWeaponIndex];
+    if (weapon.type === 'charger' && player.charging){
+      fireChargerShot();
+    }
   }
   if (e.button === 2) player.form = 'human'; // 右クリックを離すとヒト状態に戻る
 });
@@ -563,6 +644,9 @@ function resetPaint(){
   player.ink = player.maxInk;
   totalPaintPoints = 0;
   prevSampleMask.fill(false);
+  player.charging = false;
+  player.chargeFramesElapsed = 0;
+  player.chargeCooldownFramesLeft = 0;
 }
 
 // --------------------------------------------------------------------------
@@ -790,6 +874,10 @@ function paintSplatClipped(cx, cy, baseRadius, dirAngle, stretchRatio){
 // verified decel/freefall constants.
 // --------------------------------------------------------------------------
 const projectiles = [];
+// チャージャーは着弾が一瞬(ヒットスキャン)なので、飛んでいく弾を描画する
+// projectiles[] とは別に「発射した瞬間の光跡」を短時間だけ描画するための
+// 配列を持たせておく(見た目のフィードバック用。判定には一切使わない)。
+const chargerFlashes = [];
 const SPLAT_RADIUS = lines(0.15);   // ink splat radius (fallback for weapons with no falloff data)
 const DECAY_RATE_PER_FRAME_FALLBACK = 0.75; // speed multiplier per frame (only used if a weapon lacks decel/freefall data)
 
@@ -1099,6 +1187,166 @@ function updateProjectiles(dt){
   }
 }
 
+// ==========================================================================
+// チャージャー種 (リッター4K) — シューター種とは別の武器系統。
+// 左クリック長押しでチャージ→離すと現在のチャージ量に応じたステータスで
+// 1発だけ即着弾(ヒットスキャン)の弾を撃つ。射程・ダメージ・初速・インク
+// 消費・軌跡塗りの見た目がすべてチャージ量(0〜1)に応じて変化する。
+//
+// chargeLerp: ノーチャージ→フルチャージへ frac(0〜1)で連続的に線形補間する
+// 汎用ヘルパー。資料に半チャージ最大値の区切りが無い項目(軌跡塗りの半径・
+// 発生数・着弾先端塗り半径・インク消費量・単発塗りポイント)に使う。
+//
+// chargeLerpJump: ダメージ・初速のように「ノーチャージ→半チャージ(99%)まで
+// は線形に伸びるが、フルチャージ(100%)だけ別枠の値に不連続ジャンプする」
+// 項目用のヘルパー。frac>=1 (フルチャージ)でfullValを返し、それ未満は
+// frac/0.99を線形補間の進捗として使う。
+// ==========================================================================
+function chargeLerp(noVal, fullVal, frac){
+  return noVal + (fullVal - noVal) * frac;
+}
+function chargeLerpJump(noVal, halfMaxVal, fullVal, frac){
+  if (frac >= 1) return fullVal;
+  const t = Math.min(frac / 0.99, 1);
+  return noVal + (halfMaxVal - noVal) * t;
+}
+
+function getChargeFraction(){
+  const weapon = WEAPONS[currentWeaponIndex];
+  if (weapon.type !== 'charger') return 0;
+  return Math.min(player.chargeFramesElapsed / weapon.chargeFrames, 1);
+}
+
+// だ円形の軌跡塗りブロブ用の点群生成。radiusAlongは進行方向(縦半径)、
+// radiusAcrossは進行方向に直交する幅(横半径)。blobPoints()の
+// stretchDir/stretchAmt(前方だけ伸びる非対称ストレッチ)とは違い、こちらは
+// 進行方向の前後に対称に伸びる楕円を作る(軌跡塗りは弾の通り道に沿って
+// 前後対称に伸びる、というwikiの図と合わせるため)。
+function ellipseBlobPoints(cx, cy, radiusAlong, radiusAcross, angle, numPoints, irregularity){
+  const points = [];
+  for (let i = 0; i < numPoints; i++){
+    const t = (i / numPoints) * Math.PI * 2 + (Math.random() - 0.5) * (Math.PI / numPoints);
+    let rAlong = radiusAlong * (0.85 + Math.random() * 0.25);
+    let rAcross = radiusAcross * (0.85 + Math.random() * 0.25);
+    rAlong *= (1 + (Math.random() - 0.5) * 2 * irregularity);
+    rAcross *= (1 + (Math.random() - 0.5) * 2 * irregularity);
+    const lx = Math.cos(t) * rAlong;
+    const ly = Math.sin(t) * rAcross;
+    const rx = lx * Math.cos(angle) - ly * Math.sin(angle);
+    const ry = lx * Math.sin(angle) + ly * Math.cos(angle);
+    points.push({ x: cx + rx, y: cy + ry });
+  }
+  return points;
+}
+
+// 軌跡塗りの1粒。着弾splat同様、coverageLayer(判定用)とpaintLayer(見た目用)
+// の両方に同じ点群でコアの楕円ブロブを描く(=軌跡塗りは装飾ではなくwiki記載
+// の実面積なので、塗りポイント・自陣インク判定にもそのままカウントされる)。
+function paintTrailDot(cx, cy, radiusAlongPx, radiusAcrossPx, angle){
+  if (OBSTACLES.some(o => rectsOverlap(cx, cy, 1, o))) return;
+  const numPoints = 9 + Math.floor(Math.random() * 3);
+  const pts = ellipseBlobPoints(cx, cy, radiusAlongPx, radiusAcrossPx, angle, numPoints, 0.16);
+  drawCoreBlob(cctx, pts);
+  drawCoreBlob(pctx, pts);
+  pctx.globalAlpha = 1;
+}
+
+// チャージャーの発射本体。mouseupハンドラから「離した瞬間」に1回だけ呼ばれる。
+// 弾速がシューターに比べて桁違いに速い(初速24〜96DU/F)ためヒットスキャン
+// (瞬間着弾)として扱い、プレイヤー位置から照準方向へ小刻みに進めながら
+// 壁/ダミーへの当たり判定を先に解決してから、着弾点までまとめて塗りを行う。
+function fireChargerShot(){
+  const weapon = WEAPONS[currentWeaponIndex];
+  const frac = getChargeFraction();
+  player.charging = false;
+  if (frac <= 0){
+    player.chargeFramesElapsed = 0;
+    return;
+  }
+
+  // インク消費量: 資料に半チャージ最大値の明記が無いため、ノーチャージ→
+  // フルチャージへchargeLerpで連続補間する近似値を採用(chargeLerpJumpは
+  // 使わない)。
+  const inkCost = chargeLerp(weapon.inkPerShotNoCharge, weapon.inkPerShotFull, frac);
+  if (player.ink < inkCost){
+    // インク不足で発射できない場合は空撃ち扱いでチャージだけ失われる
+    // (実装上の簡略化: 本来はチャージ可能量自体がインク残量で頭打ちになる)。
+    player.chargeFramesElapsed = 0;
+    return;
+  }
+  player.ink -= inkCost;
+
+  const hitRangePx = lines(chargeLerp(weapon.rangeLinesNoCharge, weapon.rangeLinesFull, frac));
+  const paintRangePx = lines(chargeLerp(weapon.paintRangeLinesNoCharge, weapon.paintRangeLinesFull, frac));
+  const maxMarchPx = Math.max(hitRangePx, paintRangePx);
+  const angle = player.aimAngle;
+  const dirX = Math.cos(angle), dirY = Math.sin(angle);
+  const projRadiusEnemyPx = lines(weapon.projectileSizeEnemyLines) / 2;
+  const projRadiusTerrainPx = lines(weapon.projectileSizeTerrainLines) / 2;
+
+  const STEP = 4; // ヒットスキャン判定のマーチングステップ幅(px)
+  let dist = 0;
+  let hitDummyFlag = false;
+  let stoppedByWall = false;
+  while (dist < maxMarchPx){
+    const nextDist = dist + STEP;
+    const nx = player.x + dirX * nextDist;
+    const ny = player.y + dirY * nextDist;
+    if (nx < 0 || nx > W || ny < 0 || ny > H) break;
+    if (OBSTACLES.some(o => rectsOverlap(nx, ny, projRadiusTerrainPx, o))){ stoppedByWall = true; break; }
+    if (nextDist <= hitRangePx && dummy.hp > 0 &&
+        Math.hypot(nx - dummy.x, ny - dummy.y) < dummy.radius + projRadiusEnemyPx){
+      hitDummyFlag = true;
+      dist = nextDist;
+      break;
+    }
+    dist = nextDist;
+  }
+  dist = Math.min(dist, maxMarchPx);
+  const endX = player.x + dirX * dist;
+  const endY = player.y + dirY * dist;
+
+  if (hitDummyFlag){
+    const damage = chargeLerpJump(weapon.damageNoCharge, weapon.damageHalfChargeMax, weapon.damageFull, frac);
+    if (dummy.firstHitAt === null) dummy.firstHitAt = performance.now();
+    dummy.hp = Math.max(0, dummy.hp - damage);
+    if (dummy.hp === 0){
+      dummy.lastKillTimeText = ((performance.now() - dummy.firstHitAt) / 1000).toFixed(3) + '秒';
+      setTimeout(respawnDummy, 500);
+    }
+  }
+
+  // 足元塗り: このブキは平均間隔ではなく発射のたび毎回発生(資料に間隔の
+  // 記載が無かったため)。
+  paintSplatClipped(player.x, player.y, lines(weapon.footPaintRadiusLines));
+
+  // 軌跡塗り: プレイヤー〜着弾点の間にdropCount個のだ円ブロブを均等配置。
+  // 最後の1粒(着弾直前)だけtrailTipRadiusMultiplier倍の大きさにする。
+  const dropCount = Math.max(0, Math.round(chargeLerp(weapon.trailDropCountNoCharge, weapon.trailDropCountFull, frac)));
+  const radiusAcrossPx = lines(chargeLerp(weapon.trailRadiusHorizontalNoCharge, weapon.trailRadiusHorizontalFull, frac));
+  const radiusAlongPx = lines(chargeLerp(weapon.trailRadiusVerticalNoCharge, weapon.trailRadiusVerticalFull, frac));
+  for (let i = 1; i <= dropCount; i++){
+    const t = i / (dropCount + 1);
+    const dx0 = player.x + (endX - player.x) * t;
+    const dy0 = player.y + (endY - player.y) * t;
+    const isTip = (i === dropCount);
+    const mult = isTip ? weapon.trailTipRadiusMultiplier : 1;
+    paintTrailDot(dx0, dy0, radiusAlongPx * mult, radiusAcrossPx * mult, angle);
+  }
+
+  // 着弾先端塗り: 着弾点に円形のsplat。
+  const tipRadiusPx = lines(chargeLerp(weapon.tipSplatRadiusNoCharge, weapon.tipSplatRadiusFull, frac));
+  paintSplatClipped(endX, endY, tipRadiusPx);
+
+  // 発射後クールダウン: ノーチャージ(14F)〜フルチャージ(98F)の連射Fを
+  // frac で線形補間(中間チャージのF数は資料に無いため近似)。
+  player.chargeCooldownFramesLeft = chargeLerp(weapon.noChargeRecoveryFrames, weapon.fullChargeRecoveryFrames, frac);
+  player.chargeFramesElapsed = 0;
+
+  // 見た目用の光跡(150ms程度でフェードアウト)。判定・塗りには無関係。
+  chargerFlashes.push({ x1: player.x, y1: player.y, x2: endX, y2: endY, bornAt: performance.now() });
+}
+
 // --------------------------------------------------------------------------
 // Movement + the swim check. We sample a single pixel from the COVERAGE
 // layer (wiki-exact shapes only, no decoration) under the player's feet to
@@ -1123,13 +1371,51 @@ function updatePlayer(dt){
   // （急速回復の条件判定・見た目の演出に使う「地面の状態」）。
   player.isSwimming = sampleInkAt(player.x, player.y);
 
+  const weaponForMove = WEAPONS[currentWeaponIndex];
+
+  // チャージャー種のチャージ蓄積: イカ状態では今回は未実装のためチャージ
+  // 不可(押していても溜まらない)。クールダウン中(発射直後)も同様に不可。
+  if (weaponForMove.type === 'charger'){
+    if (player.chargeCooldownFramesLeft > 0){
+      player.chargeCooldownFramesLeft = Math.max(0, player.chargeCooldownFramesLeft - dt * FPS);
+    }
+    if (player.form === 'human' && mouse.down && player.chargeCooldownFramesLeft <= 0){
+      player.charging = true;
+      const curFrac = getChargeFraction();
+      const curInkCost = chargeLerp(weaponForMove.inkPerShotNoCharge, weaponForMove.inkPerShotFull, curFrac);
+      // インク不足時はチャージ時間が延びる(×3)。現在のチャージ量で撃つのに
+      // 必要なインクすら足りていない場合をその判定として使う近似。
+      const slow = player.ink < curInkCost ? weaponForMove.chargeSlowdownMultiplier : 1;
+      player.chargeFramesElapsed = Math.min(
+        weaponForMove.chargeFrames,
+        player.chargeFramesElapsed + (dt * FPS) / slow
+      );
+    } else {
+      player.charging = false;
+    }
+  }
+
   // 移動速度: イカ状態は自陣インク上かどうかでswimOnInkSpeed/swimOffInkSpeed
-  // に分岐。ヒト状態は射撃中かどうかでさらに分岐。イカ状態では左クリック
-  // (発射)自体を後段で無効化しているので、mouse.downはヒト状態のときだけ
-  // 意味を持つ。
-  const speed = player.form === 'squid'
-              ? (player.isSwimming ? player.swimOnInkSpeed : player.swimOffInkSpeed)
-              : (mouse.down ? player.shootSpeed : player.walkSpeed);
+  // に分岐。ヒト状態はブキ種によってさらに分岐——シューター種は射撃中か
+  // どうか、チャージャー種はチャージ中(かつフルチャージ保持中かどうか)で
+  // 変わる。イカ状態では左クリック(発射/チャージ)自体を後段で無効化して
+  // いるので、mouse.downはヒト状態のときだけ意味を持つ。
+  let speed;
+  if (player.form === 'squid'){
+    speed = player.isSwimming ? player.swimOnInkSpeed : player.swimOffInkSpeed;
+  } else if (weaponForMove.type === 'charger'){
+    if (player.charging){
+      const frac = getChargeFraction();
+      const chargeSpeedDU = frac >= 1
+        ? weaponForMove.postFullChargeMoveSpeedDU
+        : chargeLerp(weaponForMove.chargeMoveSpeedDUNoCharge, weaponForMove.chargeMoveSpeedDUFull, frac);
+      speed = duPerFrameToPxPerSec(chargeSpeedDU);
+    } else {
+      speed = player.walkSpeed;
+    }
+  } else {
+    speed = mouse.down ? player.shootSpeed : player.walkSpeed;
+  }
 
   let dx = 0, dy = 0;
   if (keys.w) dy -= 1;
@@ -1166,8 +1452,10 @@ function updatePlayer(dt){
 
   const now = performance.now();
   const weapon = WEAPONS[currentWeaponIndex];
-  // イカ状態では左クリック(発射)を無効化する。
-  if (player.form === 'human' && mouse.down && now - lastShotAt >= weapon.fireIntervalSec * 1000){
+  // イカ状態では左クリック(発射)を無効化する。チャージャー種はここでは
+  // 発射しない(mouseupハンドラでfireChargerShot()を呼ぶ)。
+  if (weapon.type !== 'charger' &&
+      player.form === 'human' && mouse.down && now - lastShotAt >= weapon.fireIntervalSec * 1000){
     lastShotAt = now;
     fireShot();
   }
@@ -1238,18 +1526,27 @@ const weaponNameEl = document.getElementById('weapon-name');
 const weaponStatsEl = document.getElementById('weapon-stats');
 const dummyStatusEl = document.getElementById('dummy-status');
 const hitProbabilityEl = document.getElementById('hit-probability');
+const chargeGaugeInnerEl = document.getElementById('charge-gauge-inner');
 
 function updateWeaponDisplay(){
   const w = WEAPONS[currentWeaponIndex];
   weaponNameEl.textContent = w.name;
-  const capNote = w.mainInkCapacityMultiplier !== undefined && w.mainInkCapacityMultiplier !== 1
-    ? ` ／ タンク容量×${w.mainInkCapacityMultiplier}`
-    : '';
-  weaponStatsEl.textContent =
-    `有効射程 ライン${w.rangeLines} ／ 確定数維持射程 ライン${w.confirmedKillRangeLines} ／ ` +
-    `連射${(w.fireIntervalSec * FPS).toFixed(0)}F(${w.fireIntervalSec.toFixed(3)}s) ／ ` +
-    `ダメージ ${w.damageFalloff.startDamage}→${w.damageFalloff.endDamage} ／ ` +
-    `インク消費${(w.inkPerShot).toFixed(2)}%${capNote}`;
+  if (w.type === 'charger'){
+    weaponStatsEl.textContent =
+      `射程 ライン${w.rangeLinesNoCharge}〜${w.rangeLinesFull} ／ ` +
+      `チャージ${w.chargeFrames}F(${(w.chargeFrames / FPS).toFixed(3)}s) ／ ` +
+      `ダメージ ${w.damageNoCharge}〜${w.damageHalfChargeMax}／フル${w.damageFull} ／ ` +
+      `インク消費${w.inkPerShotNoCharge}〜${w.inkPerShotFull}%`;
+  } else {
+    const capNote = w.mainInkCapacityMultiplier !== undefined && w.mainInkCapacityMultiplier !== 1
+      ? ` ／ タンク容量×${w.mainInkCapacityMultiplier}`
+      : '';
+    weaponStatsEl.textContent =
+      `有効射程 ライン${w.rangeLines} ／ 確定数維持射程 ライン${w.confirmedKillRangeLines} ／ ` +
+      `連射${(w.fireIntervalSec * FPS).toFixed(0)}F(${w.fireIntervalSec.toFixed(3)}s) ／ ` +
+      `ダメージ ${w.damageFalloff.startDamage}→${w.damageFalloff.endDamage} ／ ` +
+      `インク消費${(w.inkPerShot).toFixed(2)}%${capNote}`;
+  }
 }
 
 // 武器切り替えボタンをWEAPONSから動的に生成し、現在選択中のブキに
@@ -1360,6 +1657,21 @@ function render(){
     ctx.fill();
   }
 
+  // チャージャーの光跡フラッシュ: 発射直後だけ明るく、150msでフェードアウト。
+  const FLASH_LIFETIME_MS = 150;
+  for (let i = chargerFlashes.length - 1; i >= 0; i--){
+    const f = chargerFlashes[i];
+    const age = performance.now() - f.bornAt;
+    if (age >= FLASH_LIFETIME_MS){ chargerFlashes.splice(i, 1); continue; }
+    const alpha = 1 - age / FLASH_LIFETIME_MS;
+    ctx.strokeStyle = `rgba(255, 216, 194, ${alpha})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(f.x1, f.y1);
+    ctx.lineTo(f.x2, f.y2);
+    ctx.stroke();
+  }
+
   // Aim guide, subtle.
   ctx.strokeStyle = 'rgba(255,255,255,0.12)';
   ctx.lineWidth = 1;
@@ -1387,6 +1699,10 @@ function render(){
   ctx.restore();
 
   inkGaugeEl.style.width = (player.ink / player.maxInk * 100) + '%';
+
+  if (weaponNow.type === 'charger'){
+    chargeGaugeInnerEl.style.width = (getChargeFraction() * 100) + '%';
+  }
 
   // フォーム表示: ヒト状態は常に「自然回復のみ」。イカ状態は自陣インク上か
   // どうかで急速回復が効いているかが変わるので、それも合わせて表示する。
