@@ -113,7 +113,6 @@
     <div><kbd>Shift(長押し)</kbd> 照準ロック(カニ歩き)</div>
     <div><kbd>R</kbd> リセット</div>
     <button id="reset-btn">塗りをリセット</button>
-    <button id="toggle-coverage-btn">Coverage 表示</button>
     <div id="weapon-switch"></div>
   </div>
 </div>
@@ -234,7 +233,7 @@ function mPerFrameToPxPerSec(v){ return duPerFrameToPxPerSec(v * DU_PER_METER); 
 // ため、DU/Fへの変換ヘルパーを用意する。
 // イカ速は「自陣インク上」と「インクが無い地面上」で異なる値が検証されている。
 // 3ライン(150DU)移動にかかる時間の実測値から算出（軽量級・中量級・重量級の
-// 全カテゴリで分離データが確認されているため、旧来の「軽量級・重量級は暫定的に
+// 全カテゴリで分離データが確認できたため、旧来の「軽量級・重量級は暫定的に
 // 単一値を流用」という扱いは撤廃した）:
 //   軽量級: ヒト速2.40s／イカ速(オフインク)3.45s／イカ速(オンインク)1.30s
 //   中量級: ヒト速2.60s／イカ速(オフインク)3.45s／イカ速(オンインク)1.40s
@@ -276,7 +275,7 @@ const WEAPONS = [
     // 単発塗りポイント: 地面と並行に1発ずつ射撃して得られた塗りポイントの
     // 平均を、ナワバリバトルの塗りポイントカウンターを用いて算出した公称値。
     // 現在の塗りポイントは「ブキ固有の単発塗りポイント」を経由しない実面積
-    // 比率の共通換算方式(POINTS_PER_LINE_SQUARED、tickPaintPoints()参照)を
+    // 比例の共通換算方式(POINTS_PER_LINE_SQUARED、tickPaintPoints()参照)を
     // 採用しているため計算には使わないが、シミュレーションが実際にこの値へ
     // どれだけ近づくか（地面と並行に単発撃ちしてHUDの塗りポイント増分を見る）
     // を検証するための参照値として保持しておく。
@@ -431,7 +430,44 @@ const WEAPONS = [
   // 不連続にジャンプする(ダメージ40.0→79.9の直線的な伸びとは別に、フル
   // チャージでいきなり180.0になる、というのが実際のゲームの仕様)。
   //
-  // （長い注釈略）
+  // 補足(実装上の単純化・注意点 — わからない/確認できなかった点):
+  //  - 射程・塗り射程・初速は「ノーチャージ〜半チャージ(99%)」の区間で線形
+  //    補間し、半チャージ最大値=フルチャージ値と資料に明記されている項目
+  //    (射程・塗り射程)はそのまま同じ値をフルチャージ側にも使っている。
+  //    初速はフルチャージのみ別枠(63.9→96.0への不連続ジャンプ)として扱った。
+  //  - ダメージ・インク消費量・単発塗りポイントは「ノーチャージ→半チャージ
+  //    最大(99%)」を線形補間し、フルチャージ(100%)でだけ別枠の値に切り替える
+  //    実装にした。インク消費量は資料に半チャージ最大値の明記がなかったため、
+  //    フルチャージの25%に向けて99%地点まで線形に近づける近似にしている
+  //    (「インク消費増加/秒:16.25%/秒」等の秒間増加量はチャージ時間の刻み方
+  //    が不明だったため今回は使わず、チャージ進捗の割合で直接補間した)。
+  //  - 軌跡塗り(横半径・縦半径・発生数)や着弾先端塗り半径は、資料に半チャージ
+  //    最大値の区切りがなかったため、ノーチャージ→フルチャージへ chargeFraction
+  //    (0〜1)でそのまま連続的に線形補間している。
+  //  - チャージ前隙・チャージ時間(NC=8F/FC=92F)・発射隙(1st=1F)・発射後隙の
+  //    各項目(チャージ再開まで6F／サブ使用可能まで15F／イカ化可能まで16F／
+  //    インク回復開始まで19F)は、資料の「リッター4K フレームデータ」表から
+  //    フレーム精度で確定している値をそのまま採用した。FC/NCで発射後隙が
+  //    完全に同一という点も資料通り(=チャージ量による補間はしない、フラット
+  //    な固定値)。サブウェポン枠はこのプロトタイプに未実装のため
+  //    subWeaponLockoutFramesは保持のみで参照していない。
+  //  - チャージキープ(CK: イカ状態でチャージを保持する仕様)は今回は未実装。
+  //    このプロトタイプは既存のシューター群と同じく「左クリック＝ヒト状態限定」
+  //    という制約を踏襲しており、イカ状態中はチャージ操作自体を無効化して
+  //    いる。CK関連のフレーム値(チャージ前隙29F・チャージF1F・発射隙1F・
+  //    サブ0F・インク3F・持続75F)は将来実装するときのためckStats以下に
+  //    まとめて保持してあるだけで、現状のシミュレーションには一切影響しない。
+  //  - 連射フレーム(次の弾を撃てるまでの間隔): 資料により NC タップ撃ちを
+  //    繰り返した際の間隔は14Fちょうどであることが確定した。この14Fは
+  //    「発射後、次のチャージを始められるまで(chargeRestartFrames=6F)」＋
+  //    「ノーチャージでも必要な最短チャージ時間(minChargeFramesToFire=8F)」
+  //    の合計として素直に説明できる(6+8=14)。以前の実装は発射後隙の内訳の
+  //    うち発射隙(shotDelayFrames=1F)までchargeCooldownFramesLeftに二重で
+  //    加算していたため合計が15Fになってしまっていた——shotDelayFramesは
+  //    「チャージ完了(または離した瞬間)から弾が実際に出るまで」の遅延で
+  //    あり、chargeRestartFramesの6Fはその発射後（実弾発生後）から数える
+  //    値なので、ここに重ねて足してはいけない。よってchargeCooldownFramesLeft
+  //    はchargeRestartFramesのみを使うよう修正する。
   {
     name: 'リッター4K',
     type: 'charger',
@@ -442,35 +478,38 @@ const WEAPONS = [
     chargePreDelayHumanoidFrames: 1,  // チャージ前隙(ヒト)
     chargePreDelaySquidFrames: 6,     // チャージ前隙(イカ) — 未実装(イカ中はチャージ不可)
     shotDelayFrames: 1,               // 発射隙(1st) — チャージ完了/離した瞬間から実際に発射されるまでの遅延
-    chargeRestartFrames: 6,           // 次のチャージを開始できるまで(発射後)
+    // 発射後隙: FC(フルチャージ)・NCどちらで撃っても資料上まったく同じ値
+    // だったため、チャージ量で補間せずフラットな固定値として扱う。
+    chargeRestartFrames: 6,           // 次のチャージを開始できるまで(発射後、実弾発生を起点)
     subWeaponLockoutFrames: 15,       // サブウェポンを使えるまで(発射後) — サブ未実装のため参照はしていない
     squidLockoutFrames: 16,           // イカ状態になれるまで(発射後)
-    inkRecoveryLockoutFrames: 19,     // インク回復(インクロック解除)が始まるまで(発射後)
+    inkRecoveryLockoutFrames: 19,     // インク回復(インクロック解除)が始まるまで(発射後) — 既存の汎用ロックアウト機構(updatePlayer)をそのまま流用
+    // チャージキープ(CK)関連 — 未実装。将来実装する際の参考値としてのみ保持。
     ckStats: {
-      chargePreDelaySquidFrames: 29,
-      chargeFrames: 1,
-      shotDelayFrames: 1,
-      subWeaponLockoutFrames: 0,
-      inkRecoveryLockoutFrames: 3,
-      keepDurationFrames: 75,
+      chargePreDelaySquidFrames: 29,  // チャージキープ解除〜射撃可能になるまで(イカ)
+      chargeFrames: 1,                // チャージF
+      shotDelayFrames: 1,             // 発射隙
+      subWeaponLockoutFrames: 0,      // サブ
+      inkRecoveryLockoutFrames: 3,    // インク
+      keepDurationFrames: 75,         // チャージキープ持続時間(1.25秒)
     },
-    rangeLinesNoCharge: 2.3, rangeLinesFull: 6.2,
-    paintRangeLinesNoCharge: 3.1, paintRangeLinesFull: 6.7,
-    speedDUNoCharge: 24.0, speedDUHalfChargeMax: 63.9, speedDUFull: 96.0,
-    damageNoCharge: 40.0, damageHalfChargeMax: 79.9, damageFull: 180.0,
-    inkPerShotNoCharge: 2.25, inkPerShotFull: 25,
-    singleShotPaintPointsNoCharge: 6.6, singleShotPaintPointsFull: 32,
-    chargeMoveSpeedDUNoCharge: 0.88, chargeMoveSpeedDUFull: 0.16,
-    postFullChargeMoveSpeedDU: 0.15,
-    chargeKeepDurationFrames: 75,
-    footPaintRadiusLines: 0.24,
+    rangeLinesNoCharge: 2.3, rangeLinesFull: 6.2,             // 射程
+    paintRangeLinesNoCharge: 3.1, paintRangeLinesFull: 6.7,   // 塗り射程
+    speedDUNoCharge: 24.0, speedDUHalfChargeMax: 63.9, speedDUFull: 96.0, // 初速
+    damageNoCharge: 40.0, damageHalfChargeMax: 79.9, damageFull: 180.0,   // ダメージ
+    inkPerShotNoCharge: 2.25, inkPerShotFull: 25,             // インク消費量(%)
+    singleShotPaintPointsNoCharge: 6.6, singleShotPaintPointsFull: 32,    // 単発塗りポイント(参考値、計算には未使用)
+    chargeMoveSpeedDUNoCharge: 0.88, chargeMoveSpeedDUFull: 0.16, // チャージ中のヒト移動速度
+    postFullChargeMoveSpeedDU: 0.15,  // フルチャージ保持中(発射前)のヒト移動速度
+    chargeKeepDurationFrames: 75,     // チャージキープ持続時間 — 未実装(ckStats.keepDurationFramesと同値、互換のため残置)
+    footPaintRadiusLines: 0.24,       // 足元塗り半径(発射のたび毎回発生)
     projectileSizeEnemyLines: 0.045,
     projectileSizeTerrainLines: 0.008,
-    trailRadiusHorizontalNoCharge: 0.19, trailRadiusHorizontalFull: 0.37,
-    trailRadiusVerticalNoCharge: 0.65, trailRadiusVerticalFull: 0.37,
-    trailDropCountNoCharge: 3, trailDropCountFull: 13,
-    trailTipRadiusMultiplier: 1.5,
-    tipSplatRadiusNoCharge: 0.21, tipSplatRadiusFull: 0.77,
+    trailRadiusHorizontalNoCharge: 0.19, trailRadiusHorizontalFull: 0.37, // 軌跡塗りの横半径
+    trailRadiusVerticalNoCharge: 0.65, trailRadiusVerticalFull: 0.37,    // 軌跡塗りの縦半径(進行方向)
+    trailDropCountNoCharge: 3, trailDropCountFull: 13,        // 軌跡塗り発生数
+    trailTipRadiusMultiplier: 1.5,    // 軌跡塗りの先端(着弾直前の一粒)の半径倍率
+    tipSplatRadiusNoCharge: 0.21, tipSplatRadiusFull: 0.77,   // 着弾時の先端塗り半径
   },
 ];
 let currentWeaponIndex = 0; // switchable via switchWeapon() / weapon-switch buttons
@@ -634,47 +673,6 @@ window.addEventListener('mouseup', e => {
 stage.addEventListener('contextmenu', e => e.preventDefault());
 document.getElementById('reset-btn').addEventListener('click', resetPaint);
 
-let coverageOverlayVisible = false;
-let coverageOverlayCanvas = null;
-let coverageOverlayCtx = null;
-
-// Coverage toggle button logic — shows an overlay copy of coverageLayer
-const toggleBtn = document.getElementById('toggle-coverage-btn');
-toggleBtn.addEventListener('click', () => {
-  coverageOverlayVisible = !coverageOverlayVisible;
-  toggleBtn.textContent = coverageOverlayVisible ? 'Coverage 表示：ON' : 'Coverage 表示';
-  if (coverageOverlayVisible) {
-    if (!coverageOverlayCanvas) {
-      coverageOverlayCanvas = document.createElement('canvas');
-      coverageOverlayCanvas.width = W; coverageOverlayCanvas.height = H;
-      coverageOverlayCanvas.style.position = 'absolute';
-      coverageOverlayCanvas.style.left = '0'; coverageOverlayCanvas.style.top = '0';
-      coverageOverlayCanvas.style.pointerEvents = 'none';
-      coverageOverlayCanvas.style.opacity = '0.85';
-      document.getElementById('stage-wrap').appendChild(coverageOverlayCanvas);
-      coverageOverlayCtx = coverageOverlayCanvas.getContext('2d');
-    }
-    // draw once immediately
-    coverageOverlayCtx.clearRect(0,0,W,H);
-    coverageOverlayCtx.drawImage(coverageLayer, 0, 0);
-  } else {
-    if (coverageOverlayCanvas && coverageOverlayCanvas.parentNode) {
-      coverageOverlayCanvas.parentNode.removeChild(coverageOverlayCanvas);
-    }
-    coverageOverlayCanvas = null;
-    coverageOverlayCtx = null;
-  }
-});
-
-// Ensure overlay follows updates: lightweight RAF that updates overlay while visible
-(function overlayUpdater(){
-  if (coverageOverlayVisible && coverageOverlayCtx) {
-    coverageOverlayCtx.clearRect(0,0,W,H);
-    coverageOverlayCtx.drawImage(coverageLayer, 0, 0);
-  }
-  requestAnimationFrame(overlayUpdater);
-})();
-
 function resetPaint(){
   pctx.clearRect(0, 0, W, H);
   cctx.clearRect(0, 0, W, H);
@@ -791,23 +789,16 @@ function paintSpatter(cx, cy, baseRadius, biasDir){
   }
 }
 
-// --- coverage 用と visual 用に分離（coverage は常に不透明で描画） ---
-function drawCoreBlobCoverage(points){
-  const prevAlpha = cctx.globalAlpha;
-  cctx.fillStyle = TEAM_COLOR;
-  cctx.globalAlpha = 1.0; // ゲームロジック用：常に不透明
-  drawSmoothBlobPath(cctx, points);
-  cctx.fill();
-  cctx.globalAlpha = prevAlpha;
-}
-
-function drawCoreBlobVisual(points){
-  const prevAlpha = pctx.globalAlpha;
-  pctx.fillStyle = TEAM_COLOR;
-  pctx.globalAlpha = 0.9 + Math.random() * 0.1; // 視覚的ランダム性はここだけ
-  drawSmoothBlobPath(pctx, points);
-  pctx.fill();
-  pctx.globalAlpha = prevAlpha;
+// Draws the wiki-exact core blob shape identically to both the coverage
+// (data) layer and the paint (visual) layer, using the given target ctx's
+// fillStyle/globalAlpha convention. `targetCtx` lets callers draw the core
+// shape onto coverageLayer once and reuse the exact same point set logic
+// for the visual layer, so the two never drift apart in size.
+function drawCoreBlob(targetCtx, points){
+  targetCtx.fillStyle = TEAM_COLOR;
+  drawSmoothBlobPath(targetCtx, points);
+  targetCtx.globalAlpha = 0.9 + Math.random() * 0.1;
+  targetCtx.fill();
 }
 
 // Plain (non-directional) organic splat — used for footpaint/midpaint dots,
@@ -819,8 +810,8 @@ function drawCoreBlobVisual(points){
 function paintSplat(cx, cy, baseRadius){
   const numPoints = 8 + Math.floor(Math.random() * 4);
   const corePoints = blobPoints(cx, cy, baseRadius, numPoints, 0.3);
-  drawCoreBlobCoverage(corePoints);
-  drawCoreBlobVisual(corePoints);
+  drawCoreBlob(cctx, corePoints);
+  drawCoreBlob(pctx, corePoints);
 
   if (Math.random() < 0.6){
     const angle = Math.random() * Math.PI * 2;
@@ -831,8 +822,8 @@ function paintSplat(cx, cy, baseRadius){
     // so it counts toward coverage too — keeps the wiki radius from reading
     // as an unnaturally perfect single blob without inflating area beyond
     // what a slightly-irregular wiki-radius splat would already cover.
-    drawCoreBlobCoverage(subPoints);
-    drawCoreBlobVisual(subPoints);
+    drawCoreBlob(cctx, subPoints);
+    drawCoreBlob(pctx, subPoints);
   }
 
   paintSpatter(cx, cy, baseRadius);
@@ -856,8 +847,8 @@ function paintSplatStretched(cx, cy, baseRadius, dirAngle, stretchRatio){
 
   const numPoints = 10 + Math.floor(Math.random() * 4);
   const corePoints = blobPoints(bx, by, baseRadius, numPoints, 0.28, dirAngle, stretchRatio);
-  drawCoreBlobCoverage(corePoints);
-  drawCoreBlobVisual(corePoints);
+  drawCoreBlob(cctx, corePoints);
+  drawCoreBlob(pctx, corePoints);
 
   // one or two secondary lobes for a less-perfectly-round silhouette —
   // part of the documented splat footprint, so counted on both layers.
@@ -867,8 +858,8 @@ function paintSplatStretched(cx, cy, baseRadius, dirAngle, stretchRatio){
     const dist = baseRadius * (0.2 + Math.random() * 0.4);
     const sx = bx + Math.cos(angle) * dist, sy = by + Math.sin(angle) * dist;
     const subPoints = blobPoints(sx, sy, baseRadius * (0.35 + Math.random() * 0.3), 7, 0.35);
-    drawCoreBlobCoverage(subPoints);
-    drawCoreBlobVisual(subPoints);
+    drawCoreBlob(cctx, subPoints);
+    drawCoreBlob(pctx, subPoints);
   }
 
   // tendrils flung mostly forward, a few stragglers in other directions —
@@ -895,8 +886,7 @@ function paintSplatStretched(cx, cy, baseRadius, dirAngle, stretchRatio){
 // dirAngle/stretchRatio are optional; when given, uses the stretched
 // (directional) splat instead of the plain symmetric one.
 function paintSplatClipped(cx, cy, baseRadius, dirAngle, stretchRatio){
-  // FIXED: use actual splat radius when testing for obstacle overlap
-  const inWall = OBSTACLES.some(o => rectsOverlap(cx, cy, baseRadius, o));
+  const inWall = OBSTACLES.some(o => rectsOverlap(cx, cy, 1, o));
   if (inWall) return;
   if (dirAngle !== undefined && stretchRatio !== undefined){
     paintSplatStretched(cx, cy, baseRadius, dirAngle, stretchRatio);
@@ -912,7 +902,7 @@ function paintSplatClipped(cx, cy, baseRadius, dirAngle, stretchRatio){
 // documented 3-phase model, stepped per-frame by stepProjectilePhysics()
 // below. Y speed is tracked only as hidden state to time the decel→freefall
 // switch — this prototype is top-down, so height itself is never rendered
-// or used to decide where the shot lands. Where the shot actually lands is
+// or used to decide where a shot lands. Where the shot actually lands is
 // still governed by our own range cap (max range / cursor distance) plus
 // wall/enemy/bounds hits — the 3-phase model only changes how fast it
 // travels along the way, not where that cap sits.
@@ -1018,9 +1008,797 @@ function fireShot(){
     bias.lastShotAt = performance.now();
   }
 
-  // ...（以降既存のファイア/物理/描画ロジックはそのまま）...
+  burstShotCount++;
+  // 足元塗り: on a fixed cumulative pattern tied to shots fired in this
+  // burst (see shouldFootPaint), independent of where the actual pellet lands.
+  if (shouldFootPaint(weapon, burstShotCount)){
+    paintSplatClipped(player.x, player.y, lines(weapon.footPaintRadiusLines));
+  }
+
+  const initialSpeedPxPerSec = duPerFrameToPxPerSec(weapon.speedDU);
+  // Ink lands at the cursor's distance, capped at the weapon's max range —
+  // so aiming closer brings the splat closer, while aiming past max range
+  // still only reaches max range.
+  const cursorDist = Math.hypot(mouse.x - player.x, mouse.y - player.y);
+  const targetRange = Math.min(cursorDist, lines(weapon.maxRangeLines));
+  projectiles.push({
+    x: player.x, y: player.y,
+    startX: player.x, startY: player.y, // kept so 中間塗り can be spaced along the full flight path
+    dirX: Math.cos(angle), dirY: Math.sin(angle), // fixed flight direction; speed varies over time below
+    initialSpeed: initialSpeedPxPerSec,
+    xzSpeed: initialSpeedPxPerSec,  // 現在のXZ速度（直進→減速→自由落下で更新）
+    ySpeed: 0,                      // 隠しY速度。描画には使わず、減速→自由落下の遷移タイミング判定にのみ使う
+    phase: 'direct',                // 'direct' | 'decel' | 'freefall'
+    frameCount: 0,                  // 経過フレーム数。物理更新はこの整数フレーム単位で刻む
+    traveled: 0,
+    age: 0,
+    range: targetRange,
+    weapon,
+    burstShotIndex: burstShotCount, // which shot in the current burst fired this pellet — drives 中間塗り count
+    alive: true,
+  });
 }
 
+// Landing-splat radius: flat for placeholder weapons, or interpolated from
+// the verified 着弾塗り半径 falloff (shrinks slightly with impact distance)
+// for weapons that have one.
+function getSplatRadius(weapon, traveledLines){
+  const f = weapon.splatRadiusFalloff;
+  if (!f) return SPLAT_RADIUS;
+  if (traveledLines <= f.startDist) return lines(f.startRadius);
+  if (traveledLines >= f.endDist) return lines(f.endRadius);
+  const t = (traveledLines - f.startDist) / (f.endDist - f.startDist);
+  return lines(f.startRadius + (f.endRadius - f.startRadius) * t);
+}
+
+// 着弾塗りの前方伸び率: how far the landing splat stretches forward past the
+// impact point, interpolated the same way as the splat radius above.
+function getStretchRatio(weapon, traveledLines){
+  const f = weapon.stretchFalloff;
+  if (!f) return 1;
+  if (traveledLines <= f.startDist) return f.startRatio;
+  if (traveledLines >= f.endDist) return f.endRatio;
+  const t = (traveledLines - f.startDist) / (f.endDist - f.startDist);
+  return f.startRatio + (f.endRatio - f.startRatio) * t;
+}
+
+// 中間塗りの滴数: fixed pattern tied to shot index within the current burst,
+// not to travel distance. For a fractional 最大飛沫数 (average per shot),
+// the wiki gives this exact rule via the スプラシューター(1.5) example:
+// cumulative総数 = floor(avg * shotIndex); a given shot's drop count is the
+// difference from the previous shot's cumulative total. For avg=1.5 this
+// yields the documented 1,2,1,2,... alternating pattern.
+// 足元塗りの発生判定: footPaintAvgInterval発に1回のペースで発生させる。
+// 整数間隔（スプラシューターの4発毎）はfloor(n/avg)が単純な等間隔トリガーに
+// なるのでそのまま「Nの倍数」と同じ結果になり、わかばシューターのような
+// 非整数の平均間隔（3.5＝3発と4発の交互）も同じ式でカバーできる——中間塗り
+// のmidPaintDropsForShot()と同じ「累積個数の差分」という考え方の派生形。
+function shouldFootPaint(weapon, shotIndex){
+  if (weapon.footPaintAvgInterval === undefined) return false;
+  const avg = weapon.footPaintAvgInterval;
+  return Math.floor(shotIndex / avg) > Math.floor((shotIndex - 1) / avg);
+}
+
+function midPaintDropsForShot(weapon, shotIndex){
+  if (weapon.midPaintAvgPerShot === undefined) return 0;
+  const avg = weapon.midPaintAvgPerShot;
+  const cumulativeBefore = Math.floor(avg * (shotIndex - 1));
+  const cumulativeAfter = Math.floor(avg * shotIndex);
+  return cumulativeAfter - cumulativeBefore;
+}
+
+// 中間塗り: extra blobs placed along the flight path between the player and
+// the impact point, spaced every midPaintIntervalLines, up to the fixed
+// per-shot drop count from midPaintDropsForShot(). A short travel distance
+// (close-range shot) can still fit fewer drops than the pattern allows —
+// that's the "射程が短いブキは飛沫がスカスカになる" effect from the wiki.
+function paintMidDots(weapon, startX, startY, endX, endY, shotIndex){
+  if (weapon.midPaintIntervalLines === undefined) return;
+  const dx = endX - startX, dy = endY - startY;
+  const lenPx = Math.hypot(dx, dy);
+  if (lenPx < 1) return;
+  const ux = dx / lenPx, uy = dy / lenPx;
+  const intervalPx = lines(weapon.midPaintIntervalLines);
+  const maxByPattern = midPaintDropsForShot(weapon, shotIndex || 1);
+  const maxByDistance = Math.floor(lenPx / intervalPx);
+  const count = Math.min(maxByPattern, maxByDistance);
+  for (let i = 1; i <= count; i++){
+    const d = i * intervalPx;
+    if (d >= lenPx) break;
+    paintSplatClipped(startX + ux * d, startY + uy * d, lines(weapon.midPaintRadiusLines));
+  }
+}
+
+// 3段階弾道モデルを1フレーム分だけ進める。フレーム単位の離散漸化式（wiki記載
+// の式そのまま）で、updateProjectiles側のループから経過フレーム数ぶん呼ばれる。
+function stepProjectilePhysics(p, weapon){
+  const n = p.frameCount;
+
+  if (weapon.decelAirResistXZ === undefined){
+    // 減速・自由落下パラメータ未設定のブキ用フォールバック（簡易指数減衰）
+    if (n > weapon.directFrames) p.xzSpeed *= DECAY_RATE_PER_FRAME_FALLBACK;
+    return;
+  }
+
+  if (n <= weapon.directFrames){
+    // 直進状態：(A)一定、Yは0
+    p.xzSpeed = p.initialSpeed;
+    p.ySpeed = 0;
+    p.phase = 'direct';
+    return;
+  }
+
+  if (p.phase === 'direct') p.phase = 'decel';
+
+  if (p.phase === 'decel'){
+    const D = weapon.decelAirResistXZ;
+    const E = mPerFrameToPxPerSec(weapon.decelGravityY);
+    const floorXZ = mPerFrameToPxPerSec(weapon.decelFloorXZ_mF);
+    const floorY = mPerFrameToPxPerSec(weapon.decelFloorY_mF);
+    let nextXZ = p.xzSpeed * (1 - D);
+    let nextY = p.ySpeed * (1 - D) - E;
+    if (nextXZ < floorXZ) nextXZ = floorXZ;
+    if (nextY < floorY) nextY = floorY;
+    p.xzSpeed = nextXZ;
+    p.ySpeed = nextY;
+    // XZ・Yの両方が下限に達したら自由落下状態へ移行
+    if (nextXZ <= floorXZ && nextY <= floorY) p.phase = 'freefall';
+    return;
+  }
+
+  // 自由落下状態：空気抵抗(G)・重力(H)は減速状態と別値、下限クランプはない
+  const G = weapon.freefallAirResistXZ;
+  const H = mPerFrameToPxPerSec(weapon.freefallGravityY);
+  p.xzSpeed = p.xzSpeed * (1 - G);
+  p.ySpeed = p.ySpeed * (1 - G) - H;
+}
+
+function updateProjectiles(dt){
+  for (const p of projectiles){
+    if (!p.alive) continue;
+    const weapon = p.weapon;
+    p.age += dt;
+    const framesAlive = p.age * FPS;
+
+    // 経過フレーム数ぶんだけ物理を1F刻みで進める（描画は可変フレームレートでも、
+    // 弾道の漸化式自体は60FPS基準の離散ステップで計算する）。
+    while (p.frameCount < framesAlive){
+      p.frameCount++;
+      stepProjectilePhysics(p, weapon);
+    }
+
+    const speed = p.xzSpeed;
+    const stepX = p.dirX * speed * dt, stepY = p.dirY * speed * dt;
+    const nx = p.x + stepX, ny = p.y + stepY;
+    p.traveled += Math.hypot(stepX, stepY);
+
+    // 弾の大きさ（敵）・弾の大きさ（地形）は直径で記載されている値（wiki注記:
+    // 「数値が小さいことを踏まえて単位は直径を採用」）なので、半径として使う
+    // 際は2で割る。
+    const projRadiusEnemyPx = weapon.projectileSizeEnemyLines !== undefined ? lines(weapon.projectileSizeEnemyLines) / 2 : 0;
+    const projRadiusTerrainPx = weapon.projectileSizeTerrainLines !== undefined ? lines(weapon.projectileSizeTerrainLines) / 2 : 3;
+    const hitDummy = dummy.hp > 0 && Math.hypot(nx - dummy.x, ny - dummy.y) < dummy.radius + projRadiusEnemyPx;
+    const hitWall = OBSTACLES.some(o => rectsOverlap(nx, ny, projRadiusTerrainPx, o));
+    const outOfRange = p.traveled >= p.range;
+    const outOfBounds = nx < 0 || nx > W || ny < 0 || ny > H;
+    // 失速判定: わかばシューターにも正式な減速・自由落下パラメータ（シューター
+    // 種共通値）を設定したため、現状の2ブキではこの判定はほぼ発火しない。
+    // ただし今後、減速・自由落下パラメータが未検証のブキを追加した場合は
+    // stepProjectilePhysics側が簡易指数減衰(毎F×0.75)にフォールバックし、
+    // 指数減衰は理論上いつまでも0になりきらないため、targetRangeが収束値
+    // ギリギリのときoutOfRange判定が成立しないまま弾が生き続けてしまう
+    // （＝画面に薄い"白玉"が消えずに居座るバグ）ことがある。速度が実用上
+    // ゼロとみなせるところまで落ちたら、その場に着弾したものとして強制的に
+    // 解決する保険として残しておく。
+    const STALL_SPEED_PX_PER_SEC = 4;
+    const stalled = p.xzSpeed < STALL_SPEED_PX_PER_SEC;
+    const splatRadius = getSplatRadius(weapon, toLines(p.traveled));
+    const dirAngle = Math.atan2(p.dirY, p.dirX);
+    const stretch = getStretchRatio(weapon, toLines(p.traveled));
+
+    if (hitDummy){
+      const damage = getProjectileDamage(weapon, p.frameCount);
+      if (dummy.firstHitAt === null) dummy.firstHitAt = performance.now();
+      dummy.hp = Math.max(0, dummy.hp - damage);
+      if (dummy.hp === 0){
+        dummy.lastKillTimeText = ((performance.now() - dummy.firstHitAt) / 1000).toFixed(3) + '秒';
+        setTimeout(respawnDummy, 500);
+      }
+      paintSplatClipped(nx, ny, splatRadius, dirAngle, stretch);
+      paintMidDots(weapon, p.startX, p.startY, nx, ny, p.burstShotIndex);
+      p.alive = false;
+    } else if (hitWall || outOfRange || outOfBounds || stalled) {
+      const landX = Math.min(Math.max(nx, 0), W);
+      const landY = Math.min(Math.max(ny, 0), H);
+      paintSplatClipped(landX, landY, splatRadius, dirAngle, stretch);
+      paintMidDots(weapon, p.startX, p.startY, landX, landY, p.burstShotIndex);
+      p.alive = false;
+    } else {
+      p.x = nx; p.y = ny;
+    }
+  }
+  // Drop dead projectiles so the array doesn't grow forever.
+  for (let i = projectiles.length - 1; i >= 0; i--){
+    if (!projectiles[i].alive) projectiles.splice(i, 1);
+  }
+}
+
+// ==========================================================================
+// チャージャー種 (リッター4K) — シューター種とは別の武器系統。
+// 左クリック長押しでチャージ→離すと現在のチャージ量に応じたステータスで
+// 1発だけ即着弾(ヒットスキャン)の弾を撃つ。射程・ダメージ・初速・インク
+// 消費・軌跡塗りの見た目がすべてチャージ量(0〜1)に応じて変化する。
+//
+// chargeLerp: ノーチャージ→フルチャージへ frac(0〜1)で連続的に線形補間する
+// 汎用ヘルパー。資料に半チャージ最大値の区切りが無い項目(軌跡塗りの半径・
+// 発生数・着弾先端塗り半径・インク消費量・単発塗りポイント)に使う。
+//
+// chargeLerpJump: ダメージ・初速のように「ノーチャージ→半チャージ(99%)まで
+// は線形に伸びるが、フルチャージ(100%)だけ別枠の値に不連続ジャンプする」
+// 項目用のヘルパー。frac>=1 (フルチャージ)でfullValを返し、それ未満は
+// frac/0.99を線形補間の進捗として使う。
+// ==========================================================================
+function chargeLerp(noVal, fullVal, frac){
+  return noVal + (fullVal - noVal) * frac;
+}
+function chargeLerpJump(noVal, halfMaxVal, fullVal, frac){
+  if (frac >= 1) return fullVal;
+  const t = Math.min(frac / 0.99, 1);
+  return noVal + (halfMaxVal - noVal) * t;
+}
+
+function getChargeFraction(){
+  const weapon = WEAPONS[currentWeaponIndex];
+  if (weapon.type !== 'charger') return 0;
+  return Math.min(player.chargeFramesElapsed / weapon.chargeFrames, 1);
+}
+
+// だ円形の軌跡塗りブロブ用の点群生成。radiusAlongは進行方向(縦半径)、
+// radiusAcrossは進行方向に直交する幅(横半径)。blobPoints()の
+// stretchDir/stretchAmt(前方だけ伸びる非対称ストレッチ)とは違い、こちらは
+// 進行方向の前後に対称に伸びる楕円を作る(軌跡塗りは弾の通り道に沿って
+// 前後対称に伸びる、というwikiの図と合わせるため)。
+function ellipseBlobPoints(cx, cy, radiusAlong, radiusAcross, angle, numPoints, irregularity){
+  const points = [];
+  for (let i = 0; i < numPoints; i++){
+    const t = (i / numPoints) * Math.PI * 2 + (Math.random() - 0.5) * (Math.PI / numPoints);
+    let rAlong = radiusAlong * (0.85 + Math.random() * 0.25);
+    let rAcross = radiusAcross * (0.85 + Math.random() * 0.25);
+    rAlong *= (1 + (Math.random() - 0.5) * 2 * irregularity);
+    rAcross *= (1 + (Math.random() - 0.5) * 2 * irregularity);
+    const lx = Math.cos(t) * rAlong;
+    const ly = Math.sin(t) * rAcross;
+    const rx = lx * Math.cos(angle) - ly * Math.sin(angle);
+    const ry = lx * Math.sin(angle) + ly * Math.cos(angle);
+    points.push({ x: cx + rx, y: cy + ry });
+  }
+  return points;
+}
+
+// 軌跡塗りの1粒。着弾splat同様、coverageLayer(判定用)とpaintLayer(見た目用)
+// の両方に同じ点群でコアの楕円ブロブを描く(=軌跡塗りは装飾ではなくwiki記載
+// の実面積なので、塗りポイント・自陣インク判定にもそのままカウントされる)。
+function paintTrailDot(cx, cy, radiusAlongPx, radiusAcrossPx, angle){
+  if (OBSTACLES.some(o => rectsOverlap(cx, cy, 1, o))) return;
+  const numPoints = 9 + Math.floor(Math.random() * 3);
+  const pts = ellipseBlobPoints(cx, cy, radiusAlongPx, radiusAcrossPx, angle, numPoints, 0.16);
+  drawCoreBlob(cctx, pts);
+  drawCoreBlob(pctx, pts);
+  pctx.globalAlpha = 1;
+}
+
+// チャージャーの発射本体。mouseupハンドラから「離した瞬間」に1回だけ呼ばれる。
+// 弾速がシューターに比べて桁違いに速い(初速24〜96DU/F)ためヒットスキャン
+// (瞬間着弾)として扱い、プレイヤー位置から照準方向へ小刻みに進めながら
+// 壁/ダミーへの当たり判定を先に解決してから、着弾点までまとめて塗りを行う。
+function fireChargerShot(){
+  const weapon = WEAPONS[currentWeaponIndex];
+  let frac = getChargeFraction();
+  player.charging = false;
+
+  // 8F以内で離した場合は必ずNC(ノーチャージ)として発射する。
+  // 旧仕様ではminChargeFramesToFire未満は不発扱いだったが、新仕様の
+  //   ・8F内で離す　　　　　→ NC
+  //   ・9F〜91Fで離す　　　 → 半チャージ
+  //   ・92Fまで押し続けて離す → フルチャージ
+  // という3区分に合わせ、この範囲を不発にせずNCとして発射する。
+  // チャージが一切進んでいない(elapsed===0、クリック自体が成立しなかった
+  // ようなケース)場合のみ、何も発射せずに終了する。
+  if (player.chargeFramesElapsed <= 0){
+    return;
+  }
+  if (player.chargeFramesElapsed < weapon.minChargeFramesToFire){
+    frac = 0;
+  }
+
+  // インク消費量: 資料に半チャージ最大値の明記が無いため、ノーチャージ→
+  // フルチャージへchargeLerpで連続補間する近似値を採用(chargeLerpJumpは
+  // 使わない)。
+  const inkCost = chargeLerp(weapon.inkPerShotNoCharge, weapon.inkPerShotFull, frac);
+  if (player.ink < inkCost){
+    // インク不足で発射できない場合は空撃ち扱いでチャージだけ失われる
+    // (実装上の簡略化: 本来はチャージ可能量自体がインク残量で頭打ちになる)。
+    player.chargeFramesElapsed = 0;
+    return;
+  }
+  player.ink -= inkCost;
+
+  const hitRangePx = lines(chargeLerp(weapon.rangeLinesNoCharge, weapon.rangeLinesFull, frac));
+  const paintRangePx = lines(chargeLerp(weapon.paintRangeLinesNoCharge, weapon.paintRangeLinesFull, frac));
+  const maxMarchPx = Math.max(hitRangePx, paintRangePx);
+  const angle = player.aimAngle;
+  const dirX = Math.cos(angle), dirY = Math.sin(angle);
+  const projRadiusEnemyPx = lines(weapon.projectileSizeEnemyLines) / 2;
+  const projRadiusTerrainPx = lines(weapon.projectileSizeTerrainLines) / 2;
+
+  const STEP = 4; // ヒットスキャン判定のマーチングステップ幅(px)
+  let dist = 0;
+  let hitDummyFlag = false;
+  let stoppedByWall = false;
+  while (dist < maxMarchPx){
+    const nextDist = dist + STEP;
+    const nx = player.x + dirX * nextDist;
+    const ny = player.y + dirY * nextDist;
+    if (nx < 0 || nx > W || ny < 0 || ny > H) break;
+    if (OBSTACLES.some(o => rectsOverlap(nx, ny, projRadiusTerrainPx, o))){ stoppedByWall = true; break; }
+    if (nextDist <= hitRangePx && dummy.hp > 0 &&
+        Math.hypot(nx - dummy.x, ny - dummy.y) < dummy.radius + projRadiusEnemyPx){
+      hitDummyFlag = true;
+      dist = nextDist;
+      break;
+    }
+    dist = nextDist;
+  }
+  dist = Math.min(dist, maxMarchPx);
+  const endX = player.x + dirX * dist;
+  const endY = player.y + dirY * dist;
+
+  if (hitDummyFlag){
+    const damage = chargeLerpJump(weapon.damageNoCharge, weapon.damageHalfChargeMax, weapon.damageFull, frac);
+    if (dummy.firstHitAt === null) dummy.firstHitAt = performance.now();
+    dummy.hp = Math.max(0, dummy.hp - damage);
+    if (dummy.hp === 0){
+      dummy.lastKillTimeText = ((performance.now() - dummy.firstHitAt) / 1000).toFixed(3) + '秒';
+      setTimeout(respawnDummy, 500);
+    }
+  }
+
+  // 足元塗り: このブキは平均間隔ではなく発射のたび毎回発生
+  paintSplatClipped(player.x, player.y, lines(weapon.footPaintRadiusLines));
+
+  // 軌跡塗り: プレイヤー〜着弾点の間にdropCount個のだ円ブロブを均等配置。
+  // 最後の1粒(着弾直前)だけtrailTipRadiusMultiplier倍の大きさにする。
+  const dropCount = Math.max(0, Math.round(chargeLerp(weapon.trailDropCountNoCharge, weapon.trailDropCountFull, frac)));
+  const radiusAcrossPx = lines(chargeLerp(weapon.trailRadiusHorizontalNoCharge, weapon.trailRadiusHorizontalFull, frac));
+  const radiusAlongPx = lines(chargeLerp(weapon.trailRadiusVerticalNoCharge, weapon.trailRadiusVerticalFull, frac));
+  for (let i = 1; i <= dropCount; i++){
+    const t = i / (dropCount + 1);
+    const dx0 = player.x + (endX - player.x) * t;
+    const dy0 = player.y + (endY - player.y) * t;
+    const isTip = (i === dropCount);
+    const mult = isTip ? weapon.trailTipRadiusMultiplier : 1;
+    paintTrailDot(dx0, dy0, radiusAlongPx * mult, radiusAcrossPx * mult, angle);
+  }
+
+  // 着弾先端塗り: 着弾点に円形のsplat。
+  const tipRadiusPx = lines(chargeLerp(weapon.tipSplatRadiusNoCharge, weapon.tipSplatRadiusFull, frac));
+  paintSplatClipped(endX, endY, tipRadiusPx);
+
+  // 発射後隙: chargeCooldownFramesLeft(=次のチャージを開始できるまで)は
+  // chargeRestartFramesのみを使う。shotDelayFrames(1F)は「チャージ完了
+  // /離した瞬間から実際に弾が出るまで」の遅延であり、chargeRestartFrames
+  // の6Fはその後(実弾発生後)から数える値なので、ここで重ねて加算しては
+  // いけない(重ねて加算すると連射間隔が15Fになり、資料の14Fからずれる)。
+  //   14F = chargeRestartFrames(6F) + minChargeFramesToFire(8F)
+  // squidLockoutFramesLeft・インク回復ロックアウトは資料上、発射隙込みの
+  // 絶対フレーム数として計測されている値なので、従来通りshotDelayFrames
+  // を加算したままにしておく。
+  player.chargeCooldownFramesLeft = weapon.chargeRestartFrames;
+  player.squidLockoutFramesLeft = weapon.shotDelayFrames + weapon.squidLockoutFrames;
+  player.chargeFramesElapsed = 0;
+  // インク回復ロックアウトは既存の汎用機構(updatePlayer内、weapon.inkRecoveryLockoutFrames
+  // とlastShotAtを見る)をそのまま使うため、シューターの発射と同じくlastShotAt
+  // を更新しておく。
+  lastShotAt = performance.now();
+
+  // 見た目用の光跡(150ms程度でフェードアウト)。判定・塗りには無関係。
+  chargerFlashes.push({ x1: player.x, y1: player.y, x2: endX, y2: endY, bornAt: performance.now() });
+}
+
+// --------------------------------------------------------------------------
+// Movement + the swim check. We sample a single pixel from the COVERAGE
+// layer (wiki-exact shapes only, no decoration) under the player's feet to
+// decide whether they're "in their own ink" — cheap (1 pixel read) and,
+// crucially, immune to visual-only tendrils/spatter making the player able
+// to swim/regen in spots that aren't actually documented as painted.
+// --------------------------------------------------------------------------
+function sampleInkAt(x, y){
+  const data = cctx.getImageData(
+    Math.min(Math.max(Math.round(x), 0), W - 1),
+    Math.min(Math.max(Math.round(y), 0), H - 1),
+    1, 1
+  ).data;
+  if (data[3] < 40) return false; // effectively unpainted
+  const [r, g, b] = TEAM_COLOR_RGB;
+  const dist = Math.abs(data[0]-r) + Math.abs(data[1]-g) + Math.abs(data[2]-b);
+  return dist < 90; // close enough to team color, allowing for blob alpha blending
+}
+
+function updatePlayer(dt){
+  // 自陣インクの上に乗っているかどうかは form とは独立に判定する
+  // （急速回復の条件判定・見た目の演出に使う「地面の状態」）。
+  player.isSwimming = sampleInkAt(player.x, player.y);
+
+  const weaponForMove = WEAPONS[currentWeaponIndex];
+
+  // 発射後のイカ化不能ロック(リッター4K: squidLockoutFrames)をカウントダウン。
+  // ロック中に右クリックを押してもmousedownハンドラ側でイカ化自体を弾いて
+  // いるので、ここでは残りフレーム数の減算だけを行う。
+  if (player.squidLockoutFramesLeft > 0){
+    player.squidLockoutFramesLeft = Math.max(0, player.squidLockoutFramesLeft - dt * FPS);
+  }
+
+  // チャージャー種のチャージ蓄積: イカ状態では今回は未実装のためチャージ
+  // 不可(押していても溜まらない)。クールダウン中(発射直後)も同様に不可。
+  if (weaponForMove.type === 'charger'){
+    if (player.chargeCooldownFramesLeft > 0){
+      player.chargeCooldownFramesLeft = Math.max(0, player.chargeCooldownFramesLeft - dt * FPS);
+    }
+    if (player.form === 'human' && mouse.down && player.chargeCooldownFramesLeft <= 0){
+      player.charging = true;
+      const curFrac = getChargeFraction();
+      const curInkCost = chargeLerp(weaponForMove.inkPerShotNoCharge, weaponForMove.inkPerShotFull, curFrac);
+      // インク不足時はチャージ時間が延びる(×3)。現在のチャージ量で撃つのに
+      // 必要なインクすら足りていない場合をその判定として使う近似。
+      const slow = player.ink < curInkCost ? weaponForMove.chargeSlowdownMultiplier : 1;
+      player.chargeFramesElapsed = Math.min(
+        weaponForMove.chargeFrames,
+        player.chargeFramesElapsed + (dt * FPS) / slow
+      );
+    } else {
+      player.charging = false;
+    }
+  }
+
+  // 移動速度: イカ状態は自陣インク上かどうかでswimOnInkSpeed/swimOffInkSpeed
+  // に分岐。ヒト状態はブキ種によってさらに分岐——シューター種は射撃中か
+  // どうか、チャージャー種はチャージ中(かつフルチャージ保持中かどうか)で
+  // 変わる。イカ状態では左クリック(発射/チャージ)自体を後段で無効化して
+  // いるので、mouse.downはヒト状態のときだけ意味を持つ。
+  let speed;
+  if (player.form === 'squid'){
+    speed = player.isSwimming ? player.swimOnInkSpeed : player.swimOffInkSpeed;
+  } else if (weaponForMove.type === 'charger'){
+    if (player.charging){
+      const frac = getChargeFraction();
+      const chargeSpeedDU = frac >= 1
+        ? weaponForMove.postFullChargeMoveSpeedDU
+        : chargeLerp(weaponForMove.chargeMoveSpeedDUNoCharge, weaponForMove.chargeMoveSpeedDUFull, frac);
+      speed = duPerFrameToPxPerSec(chargeSpeedDU);
+    } else {
+      speed = player.walkSpeed;
+    }
+  } else {
+    speed = mouse.down ? player.shootSpeed : player.walkSpeed;
+  }
+
+  let dx = 0, dy = 0;
+  if (keys.w) dy -= 1;
+  if (keys.s) dy += 1;
+  if (keys.a) dx -= 1;
+  if (keys.d) dx += 1;
+  if (dx || dy){
+    const len = Math.hypot(dx, dy);
+    dx /= len; dy /= len;
+    const nx = player.x + dx * speed * dt;
+    const ny = player.y + dy * speed * dt;
+    // Simple axis-separated collision so sliding along a wall still works.
+    if (!OBSTACLES.some(o => rectsOverlap(nx, player.y, player.radius, o)) &&
+        nx > player.radius && nx < W - player.radius) player.x = nx;
+    if (!OBSTACLES.some(o => rectsOverlap(player.x, ny, player.radius, o)) &&
+        ny > player.radius && ny < H - player.radius) player.y = ny;
+  }
+
+  if (!aimLocked){
+    player.aimAngle = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+  }
+
+  const now0 = performance.now();
+  const weapon0 = WEAPONS[currentWeaponIndex];
+  const framesSinceLastShot = (now0 - lastShotAt) / 1000 * FPS;
+  const inLockout = weapon0.inkRecoveryLockoutFrames !== undefined &&
+                     lastShotAt > 0 && framesSinceLastShot < weapon0.inkRecoveryLockoutFrames;
+  if (!inLockout){
+    // 急速回復はイカ状態でかつ自陣インク上のときだけ。ヒト状態は常に自然回復のみ。
+    const rapidRegenActive = player.form === 'squid' && player.isSwimming;
+    const regen = rapidRegenActive ? player.swimRegenRate : player.regenRate;
+    player.ink = Math.min(player.maxInk, player.ink + regen * dt);
+  }
+
+  const now = performance.now();
+  const weapon = WEAPONS[currentWeaponIndex];
+  // イカ状態では左クリック(発射)を無効化する。チャージャー種はここでは
+  // 発射しない(mouseupハンドラでfireChargerShot()を呼ぶ)。
+  if (weapon.type !== 'charger' &&
+      player.form === 'human' && mouse.down && now - lastShotAt >= weapon.fireIntervalSec * 1000){
+    lastShotAt = now;
+    fireShot();
+  }
+
+  // 補正回復: once you've gone a full fireInterval without firing, the
+  // tight-cone angle decays back toward firstShotBiasDeg at biasRecoveryPerFrameDeg/frame.
+  if (weapon.firstShotBiasDeg !== undefined &&
+      now - bias.lastShotAt >= weapon.fireIntervalSec * 1000){
+    bias.currentDeg = Math.max(
+      weapon.firstShotBiasDeg,
+      bias.currentDeg - weapon.biasRecoveryPerFrameDeg * (dt * FPS)
+    );
+  }
+}
+
+// --------------------------------------------------------------------------
+// 塗りポイント (paint points) — replaces the old floor-coverage % readout.
+// Real Splatoon's turf score is area-based: painting is only worth points
+// the first time a given patch of floor turns your color; repainting ink
+// you already own scores nothing further. We approximate that here by
+// downscaling coverageLayer (wiki-exact shapes only, see the architecture
+// note near paintLayer/coverageLayer above) to the same cheap SAMPLE_W x
+// SAMPLE_H grid used previously, and on each tick comparing it against the
+// PREVIOUS tick's painted mask: only pixels that just flipped from
+// unpainted -> painted count as "new" area, so already-painted ground adds
+// nothing even if a fresh splat lands on top of it.
+//
+// 換算係数(POINTS_PER_LINE_SQUARED)について:
+// 以前はスプラシューターの公称「単発塗りポイント(4.0p)」から着弾塗り半径の
+// 平均値を使って面積を逆算し、そこから1ライン²あたりのpt数を導出していた。
+// しかし今回、ユーザーがゲーム内で実際に計測した結果、スプラ3の塗り量は
+// 「ブキの単発塗りポイント」経由の推定に頼らずとも、ほぼ実面積に比例して
+// いる可能性が高いという実測ベースの暫定値が得られたため、そちらに全面的
+// に切り替える。
+//   1p ≒ 0.1265 ライン²　（1ライン² ≒ 7.9p、100ライン² ≒ 約790p）
+// この値は「間を取った」暫定値であり、ユーザーの実測に基づくものの、まだ
+// 確定情報ではない（変更の可能性あり）。ブキ固有の単発塗りポイントを経由
+// しないため、新しいブキを追加してもこの定数は一切調整不要になる。
+// --------------------------------------------------------------------------
+const POINTS_PER_LINE_SQUARED = 1 / 0.1265; // 1p ≒ 0.1265 line²（実測・暫定値） ≒ 7.905 pt/line²
+const LINE_AREA_PER_SAMPLE_PIXEL = toLines(W / 100) * toLines(H / Math.round(100 * (H / W)));
+
+const sampleCanvas = document.createElement('canvas');
+const SAMPLE_W = 100, SAMPLE_H = Math.round(SAMPLE_W * (H / W));
+sampleCanvas.width = SAMPLE_W; sampleCanvas.height = SAMPLE_H;
+const sctx = sampleCanvas.getContext('2d');
+let prevSampleMask = new Uint8Array(SAMPLE_W * SAMPLE_H); // 0/1 painted-or-not from the previous tick
+let totalPaintPoints = 0;
+
+function tickPaintPoints(){
+  sctx.clearRect(0, 0, SAMPLE_W, SAMPLE_H);
+  sctx.drawImage(coverageLayer, 0, 0, SAMPLE_W, SAMPLE_H);
+  const data = sctx.getImageData(0, 0, SAMPLE_W, SAMPLE_H).data;
+  let newlyPainted = 0;
+  for (let i = 0, px = 0; i < data.length; i += 4, px++){
+    const isPainted = data[i + 3] > 40 ? 1 : 0;
+    if (isPainted && !prevSampleMask[px]) newlyPainted++;
+    prevSampleMask[px] = isPainted;
+  }
+  totalPaintPoints += newlyPainted * LINE_AREA_PER_SAMPLE_PIXEL * POINTS_PER_LINE_SQUARED;
+  return totalPaintPoints;
+}
+
+const coverageValueEl = document.getElementById('coverage-value');
+const inkGaugeEl = document.getElementById('ink-gauge-inner');
+const swimBadgeEl = document.getElementById('swim-badge');
+const weaponNameEl = document.getElementById('weapon-name');
+const weaponStatsEl = document.getElementById('weapon-stats');
+const dummyStatusEl = document.getElementById('dummy-status');
+const hitProbabilityEl = document.getElementById('hit-probability');
+const chargeGaugeInnerEl = document.getElementById('charge-gauge-inner');
+
+function updateWeaponDisplay(){
+  const w = WEAPONS[currentWeaponIndex];
+  weaponNameEl.textContent = w.name;
+  if (w.type === 'charger'){
+    weaponStatsEl.textContent =
+      `射程 ライン${w.rangeLinesNoCharge}〜${w.rangeLinesFull} ／ ` +
+      `チャージ${w.chargeFrames}F(${(w.chargeFrames / FPS).toFixed(3)}s)／NC${w.minChargeFramesToFire}F ／ ` +
+      `ダメージ ${w.damageNoCharge}〜${w.damageHalfChargeMax}／フル${w.damageFull} ／ ` +
+      `インク消費${w.inkPerShotNoCharge}〜${w.inkPerShotFull}% ／ ` +
+      `連射間隔(NC)${w.minChargeFramesToFire + w.chargeRestartFrames}F ／ ` +
+      `発射後隙 チャ${w.chargeRestartFrames}F・イカ${w.squidLockoutFrames}F・インク${w.inkRecoveryLockoutFrames}F`;
+  } else {
+    const capNote = w.mainInkCapacityMultiplier !== undefined && w.mainInkCapacityMultiplier !== 1
+      ? ` ／ タンク容量×${w.mainInkCapacityMultiplier}`
+      : '';
+    weaponStatsEl.textContent =
+      `有効射程 ライン${w.rangeLines} ／ 確定数維持射程 ライン${w.confirmedKillRangeLines} ／ ` +
+      `連射${(w.fireIntervalSec * FPS).toFixed(0)}F(${w.fireIntervalSec.toFixed(3)}s) ／ ` +
+      `ダメージ ${w.damageFalloff.startDamage}→${w.damageFalloff.endDamage} ／ ` +
+      `インク消費${(w.inkPerShot).toFixed(2)}%${capNote}`;
+  }
+}
+
+// 武器切り替えボタンをWEAPONSから動的に生成し、現在選択中のブキに
+// activeクラスを付与する。武器数が増えてもここは触らずに済む。
+const weaponSwitchEl = document.getElementById('weapon-switch');
+function updateWeaponSwitchButtons(){
+  weaponSwitchEl.querySelectorAll('button').forEach((btn, i) => {
+    btn.classList.toggle('active', i === currentWeaponIndex);
+  });
+}
+WEAPONS.forEach((w, i) => {
+  const btn = document.createElement('button');
+  btn.textContent = w.name;
+  btn.addEventListener('click', () => switchWeapon(i));
+  weaponSwitchEl.appendChild(btn);
+});
+
+updateWeaponDisplay();
+updateWeaponSwitchButtons();
+resetBiasState();
+
+setInterval(() => {
+  coverageValueEl.textContent = Math.round(tickPaintPoints()) + 'pt';
+}, 300);
+
+// --------------------------------------------------------------------------
+// Render: floor -> accumulated ink -> walls -> aim line -> player.
+// Nothing here mutates paint state; this function only reads it.
+// --------------------------------------------------------------------------
+function render(){
+  ctx.fillStyle = '#2a2d38';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.drawImage(paintLayer, 0, 0);
+
+  ctx.fillStyle = '#0b0c10';
+  ctx.strokeStyle = '#33384a';
+  for (const o of OBSTACLES){
+    ctx.fillRect(o.x, o.y, o.w, o.h);
+    ctx.strokeRect(o.x + 0.5, o.y + 0.5, o.w - 1, o.h - 1);
+  }
+
+  // ライン markers: full-field practice-range grid, spaced 1 line (5m) apart
+  // in both directions. 縦ライン (vertical, running top-to-bottom) are drawn
+  // in green; 横ライン (horizontal, running left-to-right) are drawn in gray.
+  ctx.lineWidth = 1;
+  ctx.font = '10px sans-serif';
+
+  ctx.strokeStyle = 'rgba(70,220,140,0.35)';
+  ctx.fillStyle = 'rgba(70,220,140,0.55)';
+  for (let n = 1; n * PIXELS_PER_LINE < W; n++){
+    const lx = n * PIXELS_PER_LINE;
+    ctx.beginPath();
+    ctx.moveTo(lx, 0);
+    ctx.lineTo(lx, H);
+    ctx.stroke();
+    ctx.fillText(String(n), lx + 3, 14);
+  }
+
+  ctx.strokeStyle = 'rgba(125,131,148,0.45)';
+  ctx.fillStyle = 'rgba(125,131,148,0.65)';
+  for (let n = 1; n * PIXELS_PER_LINE < H; n++){
+    const ly = n * PIXELS_PER_LINE;
+    ctx.beginPath();
+    ctx.moveTo(0, ly);
+    ctx.lineTo(W, ly);
+    ctx.stroke();
+    ctx.fillText(String(n), 3, ly - 3);
+  }
+
+  // Practice dummy: a static target so weapon differences (hits-to-kill,
+  // kill time) are felt directly instead of only read off the HUD.
+  ctx.fillStyle = '#4b5063';
+  ctx.beginPath();
+  ctx.arc(dummy.x, dummy.y, dummy.radius, 0, Math.PI * 2);
+  ctx.fill();
+  const hpFrac = dummy.hp / dummy.maxHp;
+  ctx.fillStyle = '#0b0c10';
+  ctx.fillRect(dummy.x - 20, dummy.y - dummy.radius - 12, 40, 5);
+  ctx.fillStyle = hpFrac > 0.3 ? '#33e6c0' : '#ff5a1f';
+  ctx.fillRect(dummy.x - 20, dummy.y - dummy.radius - 12, 40 * hpFrac, 5);
+
+  const weaponNow = WEAPONS[currentWeaponIndex];
+  const biasText = weaponNow.firstShotBiasDeg !== undefined
+    ? `　照準ブレ: ${bias.currentDeg.toFixed(3)}°(最大${weaponNow.maxBiasDeg}°)`
+    : '';
+  dummyStatusEl.textContent = `ダミーHP ${dummy.hp}/${dummy.maxHp}　直近キルタイム: ${dummy.lastKillTimeText}${biasText}`;
+
+  // 命中率(理論値): 照準が的にピッタリ合っている前提で、現在の距離とブレ
+  // 補正値から算出。ブレ機構を持たないブキでは null になり非表示にする。
+  const distToDummyPx = Math.hypot(dummy.x - player.x, dummy.y - player.y);
+  const r1Px = dummy.radius;
+  const r2Px = weaponNow.projectileSizeEnemyLines !== undefined ? lines(weaponNow.projectileSizeEnemyLines) / 2 : 0;
+  const hitProb = computeHitProbability(weaponNow, distToDummyPx, r1Px, r2Px);
+  if (hitProb === null){
+    hitProbabilityEl.textContent = '';
+  } else {
+    hitProbabilityEl.textContent = `命中率(理論値・照準完全一致時): ${hitProb.toFixed(1)}%　距離: ライン${toLines(distToDummyPx).toFixed(2)}`;
+  }
+
+  // Projectiles in flight, drawn as small bright dots that shrink as they
+  // decelerate — a visual stand-in for "falling" in this top-down 2D view.
+  ctx.fillStyle = '#ffd8c2';
+  for (const p of projectiles){
+    const speedRatio = Math.min(1, Math.max(0, p.xzSpeed / p.initialSpeed));
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 1.5 + 2 * speedRatio, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // チャージャーの光跡フラッシュ: 発射直後だけ明るく、150msでフェードアウト。
+  const FLASH_LIFETIME_MS = 150;
+  for (let i = chargerFlashes.length - 1; i >= 0; i--){
+    const f = chargerFlashes[i];
+    const age = performance.now() - f.bornAt;
+    if (age >= FLASH_LIFETIME_MS){ chargerFlashes.splice(i, 1); continue; }
+    const alpha = 1 - age / FLASH_LIFETIME_MS;
+    ctx.strokeStyle = `rgba(255, 216, 194, ${alpha})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(f.x1, f.y1);
+    ctx.lineTo(f.x2, f.y2);
+    ctx.stroke();
+  }
+
+  // Aim guide, subtle.
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(player.x, player.y);
+  ctx.lineTo(player.x + Math.cos(player.aimAngle) * 40,
+             player.y + Math.sin(player.aimAngle) * 40);
+  ctx.stroke();
+
+  // Player: a squid-like teardrop that stretches slightly while swimming,
+  // just enough to make the state change legible at a glance.
+  ctx.save();
+  ctx.translate(player.x, player.y);
+  ctx.rotate(player.aimAngle);
+  const stretch = player.form === 'squid' ? 1.35 : 1;
+  ctx.scale(stretch, 1 / Math.sqrt(stretch));
+  ctx.fillStyle = TEAM_COLOR;
+  ctx.beginPath();
+  ctx.arc(0, 0, player.radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff4';
+  ctx.beginPath();
+  ctx.arc(player.radius * 0.4, 0, player.radius * 0.35, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  inkGaugeEl.style.width = (player.ink / player.maxInk * 100) + '%';
+
+  if (weaponNow.type === 'charger'){
+    chargeGaugeInnerEl.style.width = (getChargeFraction() * 100) + '%';
+  }
+
+  // フォーム表示: ヒト状態は常に「自然回復のみ」。イカ状態は自陣インク上か
+  // どうかで急速回復が効いているかが変わるので、それも合わせて表示する。
+  const rapidRegenActive = player.form === 'squid' && player.isSwimming;
+  if (player.form === 'squid'){
+    swimBadgeEl.textContent = rapidRegenActive
+      ? '◆ イカ状態(自陣インク上)：移動速度UP／急速回復中'
+      : '◆ イカ状態(インク外)：移動速度UP／回復は自然回復のみ';
+  } else {
+    swimBadgeEl.textContent = '◆ ヒト状態：自然回復のみ';
+  }
+  swimBadgeEl.classList.toggle('active', rapidRegenActive);
+}
+
+// --------------------------------------------------------------------------
+// Main loop — dt-based so behavior is consistent regardless of frame rate.
+// --------------------------------------------------------------------------
+let lastTime = performance.now();
+function loop(now){
+  const dt = Math.min((now - lastTime) / 1000, 0.05); // clamp to avoid huge steps on tab-switch
+  lastTime = now;
+
+  updatePlayer(dt);
+  updateProjectiles(dt);
+  render();
+
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
 </script>
 </body>
 </html>
