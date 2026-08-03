@@ -48,10 +48,18 @@
   #ink-gauge-outer{
     width:120px; height:8px; border-radius:4px; background:#0b0c10;
     overflow:hidden; margin-top:6px; border:1px solid #33384a;
+    position:relative;
   }
   #ink-gauge-inner{
     height:100%; width:100%; background: linear-gradient(90deg, var(--ink-dark), var(--ink));
     transition: width .08s linear;
+  }
+  #ink-predict-band{
+    position:absolute; top:0; left:0; height:100%; width:0;
+    background: rgba(255,255,255,0.85);
+    transition: left .08s linear, width .08s linear, opacity .12s linear;
+    opacity:0;
+    pointer-events:none;
   }
   #swim-badge{
     font-size:10px; letter-spacing:.1em; text-transform:uppercase;
@@ -101,7 +109,7 @@
       </div>
       <div class="card" style="text-align:right">
         <div id="coverage-label">インク残量</div>
-        <div id="ink-gauge-outer"><div id="ink-gauge-inner"></div></div>
+        <div id="ink-gauge-outer"><div id="ink-gauge-inner"></div><div id="ink-predict-band"></div></div>
         <div id="swim-badge">◆ ヒト状態：自然回復のみ</div>
       </div>
     </div>
@@ -242,6 +250,11 @@ function mPerFrameToPxPerSec(v){ return duPerFrameToPxPerSec(v * DU_PER_METER); 
 // 実測値だった点に注意——重量級間で差がつくのはヒト速とオンインクのイカ速のみ。
 // 射撃時ヒト速はブキ固有のデータなのでここには含めず、各WEAPONSエントリの
 // shootMoveSpeedDU を参照する。
+//
+// 個別ブキの実測値が判明している場合（例: リッター4K）は、weapon.walkSpeedDU /
+// weapon.swimOnInkSpeedDU として各WEAPONSエントリ側に直接持たせ、
+// applyWeaponSpeeds()側でこのカテゴリ代表値より優先して使う。まだ実測値の
+// 無いブキは引き続きこのカテゴリ代表値にフォールバックする。
 // --------------------------------------------------------------------------
 function lineSecondsToDuPerFrame(seconds){ return DU_PER_LINE / (seconds * FPS); }
 // 3ライン(150DU)を time 秒で移動したときのDU/Fを直接返すヘルパー。
@@ -457,30 +470,32 @@ const WEAPONS = [
   //    いる。CK関連のフレーム値(チャージ前隙29F・チャージF1F・発射隙1F・
   //    サブ0F・インク3F・持続75F)は将来実装するときのためckStats以下に
   //    まとめて保持してあるだけで、現状のシミュレーションには一切影響しない。
-  //  - 連射フレーム(次の弾を撃てるまでの間隔): 資料により NC タップ撃ちを
-  //    繰り返した際の間隔は14Fちょうどであることが確定した。この14Fは
-  //    「発射後、次のチャージを始められるまで(chargeRestartFrames=6F)」＋
-  //    「ノーチャージでも必要な最短チャージ時間(minChargeFramesToFire=8F)」
-  //    の合計として素直に説明できる(6+8=14)。以前の実装は発射後隙の内訳の
-  //    うち発射隙(shotDelayFrames=1F)までchargeCooldownFramesLeftに二重で
-  //    加算していたため合計が15Fになってしまっていた——shotDelayFramesは
-  //    「チャージ完了(または離した瞬間)から弾が実際に出るまで」の遅延で
-  //    あり、chargeRestartFramesの6Fはその発射後（実弾発生後）から数える
-  //    値なので、ここに重ねて足してはいけない。よってchargeCooldownFramesLeft
-  //    はchargeRestartFramesのみを使うよう修正する。
+  //  - 非射撃時ヒト速度・イカ速(自陣インク上)は、以前は重量級カテゴリの
+  //    代表値(WEIGHT_CLASS_STATS.重量級)を流用していたが、ブキ固有の実測値
+  //    (ヒト速0.88DU/F・イカ速1.74DU/F)が判明したため walkSpeedDU /
+  //    swimOnInkSpeedDU としてこのエントリに直接持たせ、そちらを優先する
+  //    （applyWeaponSpeeds()参照）。イカ速(インク外)は重量級カテゴリ共通の
+  //    実測値のままなので、引き続きWEIGHT_CLASS_STATS側を使う。
+  //  - チャージ中の消費インク予測(白い帯)・チャージ中は自然回復が止まる、
+  //    という仕様はチャージャー種共通のUI/挙動として実装した
+  //    （render()内のink-predict-band更新、updatePlayer()内のchargingNow
+  //    による自然回復停止を参照）。
+  // --------------------------------------------------------------------------
   {
     name: 'リッター4K',
     type: 'charger',
     weightClass: '重量級',
+    walkSpeedDU: 0.88,        // 非射撃時ヒト速度（ブキ固有の実測値。重量級代表値[≒0.893]より優先）
+    swimOnInkSpeedDU: 1.74,   // イカ速・自陣インク上（ブキ固有の実測値。重量級代表値[≒1.667]より優先）
     chargeFrames: 92,                 // フルチャージ時間 92F(1.533s)
-    minChargeFramesToFire: 8,         // ノーチャージ時のチャージ時間 8F — これ以内で離すとNC扱いで発射される(不発にはならない)
+    minChargeFramesToFire: 8,         // ノーチャージ時のチャージ時間 8F — これより早く離すと不発(チャージだけ失われる)
     chargeSlowdownMultiplier: 3,      // インク不足時のチャージ時間倍率(×3=チャージ速度1/3)
     chargePreDelayHumanoidFrames: 1,  // チャージ前隙(ヒト)
     chargePreDelaySquidFrames: 6,     // チャージ前隙(イカ) — 未実装(イカ中はチャージ不可)
     shotDelayFrames: 1,               // 発射隙(1st) — チャージ完了/離した瞬間から実際に発射されるまでの遅延
     // 発射後隙: FC(フルチャージ)・NCどちらで撃っても資料上まったく同じ値
     // だったため、チャージ量で補間せずフラットな固定値として扱う。
-    chargeRestartFrames: 6,           // 次のチャージを開始できるまで(発射後、実弾発生を起点)
+    chargeRestartFrames: 6,           // 次のチャージを開始できるまで(発射後)
     subWeaponLockoutFrames: 15,       // サブウェポンを使えるまで(発射後) — サブ未実装のため参照はしていない
     squidLockoutFrames: 16,           // イカ状態になれるまで(発射後)
     inkRecoveryLockoutFrames: 19,     // インク回復(インクロック解除)が始まるまで(発射後) — 既存の汎用ロックアウト機構(updatePlayer)をそのまま流用
@@ -510,6 +525,14 @@ const WEAPONS = [
     trailDropCountNoCharge: 3, trailDropCountFull: 13,        // 軌跡塗り発生数
     trailTipRadiusMultiplier: 1.5,    // 軌跡塗りの先端(着弾直前の一粒)の半径倍率
     tipSplatRadiusNoCharge: 0.21, tipSplatRadiusFull: 0.77,   // 着弾時の先端塗り半径
+    // 以下は参考値（このシミュレーションでは他の値から実質的に再現される
+    // 派生統計であり、直接は計算に使っていない）:
+    //   連射フレーム: 14F(0.233s, ノーチャージ) 〜 98F(1.633s, フルチャージ)
+    //   キルタイム: 0.667s/kill(ノーチャージ) 〜 1.600s/kill(フルチャージ、チャージ時間込み)
+    //   DPS: 171.4/秒(ノーチャージ) 〜 110.2/秒(フルチャージ)
+    //   確定数: 3〜2(ノーチャージ〜半チャージ) / 1(フルチャージ)
+    //   インク効率(ダメージ): 1778/14.8kill(NC) 〜 720/4.0kill(FC)
+    //   インク効率(塗り): 290p(NC) 〜 130p(FC)
   },
 ];
 let currentWeaponIndex = 0; // switchable via switchWeapon() / weapon-switch buttons
@@ -551,8 +574,17 @@ const player = {
 function applyWeaponSpeeds(){
   const weapon = WEAPONS[currentWeaponIndex];
   const stats = WEIGHT_CLASS_STATS[weapon.weightClass];
-  player.walkSpeed = duPerFrameToPxPerSec(lineSecondsToDuPerFrame(stats.walkSeconds50DU));
-  player.swimOnInkSpeed = duPerFrameToPxPerSec(stats.swimOnInkDU);
+  // 非射撃時ヒト速・イカ速(自陣インク上)は、ブキ固有の実測値が判明している
+  // 場合（weapon.walkSpeedDU / weapon.swimOnInkSpeedDU）はそちらを優先する。
+  // 未判明のブキは引き続き重量級カテゴリの代表値(WEIGHT_CLASS_STATS)に
+  // フォールバックする。イカ速(インク外)はどの重量級カテゴリでも共通の
+  // 実測値なので、常にカテゴリ代表値を使う。
+  player.walkSpeed = weapon.walkSpeedDU !== undefined
+    ? duPerFrameToPxPerSec(weapon.walkSpeedDU)
+    : duPerFrameToPxPerSec(lineSecondsToDuPerFrame(stats.walkSeconds50DU));
+  player.swimOnInkSpeed = weapon.swimOnInkSpeedDU !== undefined
+    ? duPerFrameToPxPerSec(weapon.swimOnInkSpeedDU)
+    : duPerFrameToPxPerSec(stats.swimOnInkDU);
   player.swimOffInkSpeed = duPerFrameToPxPerSec(stats.swimOffInkDU);
   player.shootSpeed = weapon.shootMoveSpeedDU !== undefined ? duPerFrameToPxPerSec(weapon.shootMoveSpeedDU) : player.walkSpeed;
   // インクタンク容量: ほとんどのブキは基準100（マルチプライヤ未設定=1倍）。
@@ -1293,22 +1325,16 @@ function paintTrailDot(cx, cy, radiusAlongPx, radiusAcrossPx, angle){
 // 壁/ダミーへの当たり判定を先に解決してから、着弾点までまとめて塗りを行う。
 function fireChargerShot(){
   const weapon = WEAPONS[currentWeaponIndex];
-  let frac = getChargeFraction();
+  const frac = getChargeFraction();
   player.charging = false;
 
-  // 8F以内で離した場合は必ずNC(ノーチャージ)として発射する。
-  // 旧仕様ではminChargeFramesToFire未満は不発扱いだったが、新仕様の
-  //   ・8F内で離す　　　　　→ NC
-  //   ・9F〜91Fで離す　　　 → 半チャージ
-  //   ・92Fまで押し続けて離す → フルチャージ
-  // という3区分に合わせ、この範囲を不発にせずNCとして発射する。
-  // チャージが一切進んでいない(elapsed===0、クリック自体が成立しなかった
-  // ようなケース)場合のみ、何も発射せずに終了する。
-  if (player.chargeFramesElapsed <= 0){
+  // ノーチャージの最低チャージ時間(minChargeFramesToFire=8F)に満たない
+  // うちに離した場合は不発扱い——資料の「チャージ時間: 8F(NC)」は
+  // 「NC相当の発射に必要な最短保持フレーム数」と解釈し、それ未満は
+  // チャージだけ失われて何も発射されない。
+  if (frac <= 0 || player.chargeFramesElapsed < weapon.minChargeFramesToFire){
+    player.chargeFramesElapsed = 0;
     return;
-  }
-  if (player.chargeFramesElapsed < weapon.minChargeFramesToFire){
-    frac = 0;
   }
 
   // インク消費量: 資料に半チャージ最大値の明記が無いため、ノーチャージ→
@@ -1363,7 +1389,8 @@ function fireChargerShot(){
     }
   }
 
-  // 足元塗り: このブキは平均間隔ではなく発射のたび毎回発生
+  // 足元塗り: このブキは平均間隔ではなく発射のたび毎回発生(資料に間隔の
+  // 記載が無かったため)。
   paintSplatClipped(player.x, player.y, lines(weapon.footPaintRadiusLines));
 
   // 軌跡塗り: プレイヤー〜着弾点の間にdropCount個のだ円ブロブを均等配置。
@@ -1384,16 +1411,14 @@ function fireChargerShot(){
   const tipRadiusPx = lines(chargeLerp(weapon.tipSplatRadiusNoCharge, weapon.tipSplatRadiusFull, frac));
   paintSplatClipped(endX, endY, tipRadiusPx);
 
-  // 発射後隙: chargeCooldownFramesLeft(=次のチャージを開始できるまで)は
-  // chargeRestartFramesのみを使う。shotDelayFrames(1F)は「チャージ完了
-  // /離した瞬間から実際に弾が出るまで」の遅延であり、chargeRestartFrames
-  // の6Fはその後(実弾発生後)から数える値なので、ここで重ねて加算しては
-  // いけない(重ねて加算すると連射間隔が15Fになり、資料の14Fからずれる)。
-  //   14F = chargeRestartFrames(6F) + minChargeFramesToFire(8F)
-  // squidLockoutFramesLeft・インク回復ロックアウトは資料上、発射隙込みの
-  // 絶対フレーム数として計測されている値なので、従来通りshotDelayFrames
-  // を加算したままにしておく。
-  player.chargeCooldownFramesLeft = weapon.chargeRestartFrames;
+  // 発射後隙: 資料により、次のチャージ開始まで(chargeRestartFrames)・
+  // イカ化まで(squidLockoutFrames)・インク回復開始まで(inkRecoveryLockoutFrames、
+  // updatePlayer側の汎用ロックアウト機構をlastShotAt経由でそのまま流用)は
+  // いずれもFC/NCで完全に同一のフラット値なので、チャージ量による補間は
+  // 行わない。実際にトリガーが動くのは「発射隙(shotDelayFrames=1F)」ぶん
+  // 遅れてからなので、次のチャージが開始できるまでの合計は
+  // shotDelayFrames + chargeRestartFrames としている。
+  player.chargeCooldownFramesLeft = weapon.shotDelayFrames + weapon.chargeRestartFrames;
   player.squidLockoutFramesLeft = weapon.shotDelayFrames + weapon.squidLockoutFrames;
   player.chargeFramesElapsed = 0;
   // インク回復ロックアウトは既存の汎用機構(updatePlayer内、weapon.inkRecoveryLockoutFrames
@@ -1508,7 +1533,12 @@ function updatePlayer(dt){
   const framesSinceLastShot = (now0 - lastShotAt) / 1000 * FPS;
   const inLockout = weapon0.inkRecoveryLockoutFrames !== undefined &&
                      lastShotAt > 0 && framesSinceLastShot < weapon0.inkRecoveryLockoutFrames;
-  if (!inLockout){
+  // チャージャー種はチャージを溜めている間、消費予測ぶんのインクを
+  // "確保"している状態として扱い、自然回復も止める
+  // （＝チャージ中は白い帯(予測)が伸びるだけで、ゲージの緑残量自体は減らないが、
+  // 　自然回復による裏側での増加も同時に止まる、という仕様）。
+  const chargingNow = weapon0.type === 'charger' && player.charging;
+  if (!inLockout && !chargingNow){
     // 急速回復はイカ状態でかつ自陣インク上のときだけ。ヒト状態は常に自然回復のみ。
     const rapidRegenActive = player.form === 'squid' && player.isSwimming;
     const regen = rapidRegenActive ? player.swimRegenRate : player.regenRate;
@@ -1586,6 +1616,7 @@ function tickPaintPoints(){
 
 const coverageValueEl = document.getElementById('coverage-value');
 const inkGaugeEl = document.getElementById('ink-gauge-inner');
+const inkPredictBandEl = document.getElementById('ink-predict-band');
 const swimBadgeEl = document.getElementById('swim-badge');
 const weaponNameEl = document.getElementById('weapon-name');
 const weaponStatsEl = document.getElementById('weapon-stats');
@@ -1602,7 +1633,6 @@ function updateWeaponDisplay(){
       `チャージ${w.chargeFrames}F(${(w.chargeFrames / FPS).toFixed(3)}s)／NC${w.minChargeFramesToFire}F ／ ` +
       `ダメージ ${w.damageNoCharge}〜${w.damageHalfChargeMax}／フル${w.damageFull} ／ ` +
       `インク消費${w.inkPerShotNoCharge}〜${w.inkPerShotFull}% ／ ` +
-      `連射間隔(NC)${w.minChargeFramesToFire + w.chargeRestartFrames}F ／ ` +
       `発射後隙 チャ${w.chargeRestartFrames}F・イカ${w.squidLockoutFrames}F・インク${w.inkRecoveryLockoutFrames}F`;
   } else {
     const capNote = w.mainInkCapacityMultiplier !== undefined && w.mainInkCapacityMultiplier !== 1
@@ -1767,6 +1797,29 @@ function render(){
 
   inkGaugeEl.style.width = (player.ink / player.maxInk * 100) + '%';
 
+  // チャージ中の消費インク予測（白い帯）:
+  // 現在のチャージ量(chargeFraction)から算出した「今離したら消費される
+  // であろうインク量」を、インクゲージの現在値の右端(高インク側)から
+  // 差し引いた区間に白帯として重ねて表示する。チャージ時間が伸びるほど
+  // 予測消費量(predictedCost)も増えるので帯が左へ広がっていき、実際に
+  // 発射するとインクが本当に減って帯は消える(player.charging=falseになる
+  // ため)——見た目上は白帯が消えてオレンジのゲージがその位置まで縮む形
+  // になり、「白い帯が右から順番に消えていく」という見た目に近づく。
+  // ヒト状態でチャージ中のときだけ表示し、イカ状態になった瞬間
+  // （チャージ不可）は非表示にする。
+  if (weaponNow.type === 'charger' && player.form === 'human' && player.charging){
+    const frac = getChargeFraction();
+    const predictedCost = chargeLerp(weaponNow.inkPerShotNoCharge, weaponNow.inkPerShotFull, frac);
+    const beforeFrac = Math.min(1, player.ink / player.maxInk);
+    const afterFrac = Math.max(0, (player.ink - predictedCost) / player.maxInk);
+    inkPredictBandEl.style.left = (afterFrac * 100) + '%';
+    inkPredictBandEl.style.width = Math.max(0, (beforeFrac - afterFrac) * 100) + '%';
+    inkPredictBandEl.style.opacity = '1';
+  } else {
+    inkPredictBandEl.style.opacity = '0';
+    inkPredictBandEl.style.width = '0%';
+  }
+
   if (weaponNow.type === 'charger'){
     chargeGaugeInnerEl.style.width = (getChargeFraction() * 100) + '%';
   }
@@ -1778,6 +1831,8 @@ function render(){
     swimBadgeEl.textContent = rapidRegenActive
       ? '◆ イカ状態(自陣インク上)：移動速度UP／急速回復中'
       : '◆ イカ状態(インク外)：移動速度UP／回復は自然回復のみ';
+  } else if (weaponNow.type === 'charger' && player.charging){
+    swimBadgeEl.textContent = '◆ ヒト状態：チャージ中(自然回復は停止)';
   } else {
     swimBadgeEl.textContent = '◆ ヒト状態：自然回復のみ';
   }
