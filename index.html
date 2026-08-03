@@ -463,7 +463,7 @@ const WEAPONS = [
     type: 'charger',
     weightClass: '重量級',
     chargeFrames: 92,                 // フルチャージ時間 92F(1.533s)
-    minChargeFramesToFire: 8,         // ノーチャージ時のチャージ時間 8F — これより早く離すと不発(チャージだけ失われる)
+    minChargeFramesToFire: 8,         // ノーチャージ時のチャージ時間 8F — これ以内で離すとNC扱いで発射される(不発にはならない)
     chargeSlowdownMultiplier: 3,      // インク不足時のチャージ時間倍率(×3=チャージ速度1/3)
     chargePreDelayHumanoidFrames: 1,  // チャージ前隙(ヒト)
     chargePreDelaySquidFrames: 6,     // チャージ前隙(イカ) — 未実装(イカ中はチャージ不可)
@@ -1283,16 +1283,22 @@ function paintTrailDot(cx, cy, radiusAlongPx, radiusAcrossPx, angle){
 // 壁/ダミーへの当たり判定を先に解決してから、着弾点までまとめて塗りを行う。
 function fireChargerShot(){
   const weapon = WEAPONS[currentWeaponIndex];
-  const frac = getChargeFraction();
+  let frac = getChargeFraction();
   player.charging = false;
 
-  // ノーチャージの最低チャージ時間(minChargeFramesToFire=8F)に満たない
-  // うちに離した場合は不発扱い——資料の「チャージ時間: 8F(NC)」は
-  // 「NC相当の発射に必要な最短保持フレーム数」と解釈し、それ未満は
-  // チャージだけ失われて何も発射されない。
-  if (frac <= 0 || player.chargeFramesElapsed < weapon.minChargeFramesToFire){
-    player.chargeFramesElapsed = 0;
+  // 8F以内で離した場合は必ずNC(ノーチャージ)として発射する。
+  // 旧仕様ではminChargeFramesToFire未満は不発扱いだったが、新仕様の
+  //   ・8F内で離す　　　　　→ NC
+  //   ・9F〜91Fで離す　　　 → 半チャージ
+  //   ・92Fまで押し続けて離す → フルチャージ
+  // という3区分に合わせ、この範囲を不発にせずNCとして発射する。
+  // チャージが一切進んでいない(elapsed===0、クリック自体が成立しなかった
+  // ようなケース)場合のみ、何も発射せずに終了する。
+  if (player.chargeFramesElapsed <= 0){
     return;
+  }
+  if (player.chargeFramesElapsed < weapon.minChargeFramesToFire){
+    frac = 0;
   }
 
   // インク消費量: 資料に半チャージ最大値の明記が無いため、ノーチャージ→
