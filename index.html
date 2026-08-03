@@ -284,8 +284,11 @@ function splatRadiusFalloffFromScale(scale, startDist, rawStartRadius, endDist, 
 // 全カテゴリで分離データが確認できたため、旧来の「軽量級・重量級は暫定的に
 // 単一値を流用」という扱いは撤廃した）:
 //   軽量級: ヒト速2.40s／イカ速(オフインク)3.45s／イカ速(オンインク)1.30s
-//   中量級: ヒト速2.60s／イカ速(オフインク)3.45s／イカ速(オンインク)1.40s
+//   中量級: ヒト速2.60s／イカ速(オフインク)3.45s／イカ速(オンインク)1.30s（詳細後述）
 //   重量級: ヒト速2.80s／イカ速(オフインク)3.45s／イカ速(オンインク)1.50s
+// 中量級のオンインク値は、スプラシューター(中量級)のwiki実測値
+// 「イカ速:1.92」との突き合わせにより1.40s→1.30sへ修正済み（下のconst
+// WEIGHT_CLASS_STATS直前のコメントに詳細）。
 // オフインクのイカ速はどの重量級カテゴリでも同一（3.45s/3ライン）という
 // 実測値だった点に注意——重量級間で差がつくのはヒト速とオンインクのイカ速のみ。
 // 射撃時ヒト速はブキ固有のデータなのでここには含めず、各WEAPONSエントリの
@@ -298,9 +301,17 @@ function lineSecondsToDuPerFrame(seconds){ return DU_PER_LINE / (seconds * FPS);
 // に合わせるため、3ラインの実測秒数を3で割った「1ラインあたり秒」を渡す）。
 function threeLineSecondsToDuPerFrame(seconds){ return (3 * DU_PER_LINE) / (seconds * FPS); }
 
+// 軽量級: ヒト速2.40s／イカ速(オフインク)3.45s／イカ速(オンインク)1.30s
+//   中量級: ヒト速2.60s／イカ速(オフインク)3.45s／イカ速(オンインク)1.30s
+//   重量級: ヒト速2.80s／イカ速(オフインク)3.45s／イカ速(オンインク)1.50s
+// 中量級のオンインク値は元々1.40sとしていたが、スプラシューター(中量級)の
+// wiki実測値「イカ速:1.92」と突き合わせたところ1.7857にしかならず不一致
+// だったため、1.92に一致する1.3021s(≈1.30s)に修正した。結果的に軽量級と
+// 同じ1.30sになったが、軽量級側はこの検証の対象外（軽量級ブキのwikiページ
+// でまだ裏取りできていない）なので、偶然の一致か本来同じ値なのかは未確認。
 const WEIGHT_CLASS_STATS = {
   '軽量級': { walkSeconds50DU: 2.40 / 3, swimOnInkDU: threeLineSecondsToDuPerFrame(1.30), swimOffInkDU: threeLineSecondsToDuPerFrame(3.45) },
-  '中量級': { walkSeconds50DU: 2.60 / 3, swimOnInkDU: threeLineSecondsToDuPerFrame(1.40), swimOffInkDU: threeLineSecondsToDuPerFrame(3.45) },
+  '中量級': { walkSeconds50DU: 2.60 / 3, swimOnInkDU: threeLineSecondsToDuPerFrame(1.30), swimOffInkDU: threeLineSecondsToDuPerFrame(3.45) },
   '重量級': { walkSeconds50DU: 2.80 / 3, swimOnInkDU: threeLineSecondsToDuPerFrame(1.50), swimOffInkDU: threeLineSecondsToDuPerFrame(3.45) },
 };
 
@@ -390,12 +401,18 @@ const WEAPONS = [
     // this one where the interval is a fixed integer (4), that logic just
     // reduces to "every 4th shot" — so it doubles as the general case that
     // also covers わかばシューター's alternating "3→4発毎" interval below.
-    footPaintAvgInterval: 4,
-    // 半径: wiki生値0.41 lineにSPLASH_SHOOTER_PAINT_SCALEを掛けたもの。
-    // 着弾splatと同じ縮尺を使わないと、この足元塗りだけ旧スケールの
-    // まま残って塗りポイントが桁違いに膨れ上がる（実測: 未縮小のまま
-    // 2500pt/line^2を適用すると1個で約1320pt）。
-    footPaintRadiusLines: 0.41 * SPLASH_SHOOTER_PAINT_SCALE,
+    footPaintAvgInterval: 4,   // 4発毎（22F毎）
+    // 半径: wiki実測値通り0.41 lineをそのまま採用（自身[player.x, player.y]
+    // を中心に発生させる — 発火箇所はfireShot()内のpaintSplatClipped
+    // (player.x, player.y, ...)呼び出し）。
+    // 注意: 前回SPLASH_SHOOTER_PAINT_SCALEで縮小していたのは、この生の
+    // 半径のままだと塗りポイントカウンターが1個あたり約1320pt
+    // (0.41^2*π*2500pt/line^2)も加算されてしまうため。今回0.41に戻した
+    // ことで、連射中は再びこの分だけ塗りポイントが跳ね上がる状態に戻る
+    // （単発塗りポイント4.0pの検証は「1発ずつ単発で撃つ」測定なので
+    // burstShotCountが毎回リセットされ足元塗りは発生せず、その測定値
+    // 自体とは矛盾しないが、連射中のスコア表示は跳ねる）。
+    footPaintRadiusLines: 0.41,
     // 中間塗り: extra blobs along the flight path between player and impact,
     // spaced every 1.84 lines. The wiki's documented rule: each weapon has a
     // fixed 最大飛沫数 (max drop count) per shot; when that count is
