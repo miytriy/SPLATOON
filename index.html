@@ -1347,13 +1347,16 @@ function fireChargerShot(){
   // フルチャージへchargeLerpで連続補間する近似値を採用(chargeLerpJumpは
   // 使わない)。
   const inkCost = chargeLerp(weapon.inkPerShotNoCharge, weapon.inkPerShotFull, frac);
-  if (player.ink < inkCost){
-    // インク不足で発射できない場合は空撃ち扱いでチャージだけ失われる
-    // (実装上の簡略化: 本来はチャージ可能量自体がインク残量で頭打ちになる)。
-    player.chargeFramesElapsed = 0;
-    return;
-  }
-  player.ink -= inkCost;
+  // チャージャー種の定義: インク不足時でも専用の(遅い)チャージ時間で
+  // チャージを溜めることができ(updatePlayer()内、player.ink < curInkCost
+  // のときchargeSlowdownMultiplierで速度を落とす処理を参照)、そのチャージ
+  // が完了すれば——たとえその時点でインクが足りていなくても——ショットは
+  // 発射できる。以前は「インクが足りなければチャージだけ失われて不発」と
+  // いう実装だったが、これは「インク不足でもチャージ完了すれば撃てる」と
+  // いう定義に反していたため撤廃した。発射時のインク消費は残量を上限に
+  // (Math.max(0, ...)で0未満にはならない)差し引くだけにする——本来のゲーム
+  // でもインクタンクがマイナスになることはない。
+  player.ink = Math.max(0, player.ink - inkCost);
 
   const hitRangePx = lines(chargeLerp(weapon.rangeLinesNoCharge, weapon.rangeLinesFull, frac));
   const paintRangePx = lines(chargeLerp(weapon.paintRangeLinesNoCharge, weapon.paintRangeLinesFull, frac));
