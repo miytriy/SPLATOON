@@ -485,6 +485,11 @@ const WEAPONS = [
   //    という仕様はチャージャー種共通のUI/挙動として実装した
   //    （render()内のink-predict-band更新、updatePlayer()内のchargingNow
   //    による自然回復停止を参照）。
+  //  - 8F未満(minChargeFramesToFire未満)でZRを離した場合の扱い: 実機は
+  //    「離した時点のチャージ量」で不発になるのではなく、チャージ自体は
+  //    そのままヒト状態で継続し、8Fへ到達した瞬間にノーチャージ相当の
+  //    弾が自動的に発射される。この挙動を player.pendingChargeFire で
+  //    表現している（詳細はplayer/updatePlayer/mouseupの各コメント参照）。
   // --------------------------------------------------------------------------
   {
     name: 'リッター4K',
@@ -493,7 +498,8 @@ const WEAPONS = [
     walkSpeedDU: 0.88,        // 非射撃時ヒト速度（ブキ固有の実測値。重量級代表値[≒0.893]より優先）
     swimOnInkSpeedDU: 1.74,   // イカ速・自陣インク上（ブキ固有の実測値。重量級代表値[≒1.667]より優先）
     chargeFrames: 92,                 // フルチャージ時間 92F(1.533s)
-    minChargeFramesToFire: 8,         // ノーチャージ時のチャージ時間 8F — これより早く離すと不発(チャージだけ失われる)
+    minChargeFramesToFire: 8,         // ノーチャージ時のチャージ時間 8F — これより早く離すと、8Fに到達するまで
+                                       // チャージを継続し、到達した瞬間に自動発射される(不発にはならない)
     chargeSlowdownMultiplier: 3,      // インク不足時のチャージ時間倍率(×3=チャージ速度1/3)
     chargePreDelayHumanoidFrames: 1,  // チャージ前隙(ヒト)
     chargePreDelaySquidFrames: 6,     // チャージ前隙(イカ) — 未実装(イカ中はチャージ不可)
@@ -577,6 +583,13 @@ const player = {
   charging: false,         // 左クリックを押し続けてチャージ中か
   chargeCooldownFramesLeft: 0, // 発射後、次のチャージを開始できるまでの残りフレーム数
   squidLockoutFramesLeft: 0,   // 発射後、イカ状態になれるまでの残りフレーム数(リッター4Kのsquidロック用)
+  // 早離しの自動発射待ち: minChargeFramesToFire(8F)未満で左クリックを
+  // 離した場合にtrueになる。trueの間はマウスが離されていてもヒト状態の
+  // ままチャージを継続させ、chargeFramesElapsedが8Fに到達した瞬間
+  // updatePlayer()側で自動的にfireChargerShot()を呼んでノーチャージ弾を
+  // 発射する（＝実機の「8F未満で離しても不発にはならず、8F分は必ず
+  // チャージしてから発射される」という仕様の再現）。
+  pendingChargeFire: false,
   // --- チャージキープ(CK)関連 ---
   chargeKeepActive: false,      // フルチャージ後に潜伏して発生した「本物の」チャージキープ中か
   chargeKeepFramesLeft: 0,      // チャージキープの残り持続フレーム数(潜伏中のみ減少。0で灯が消えチャージも失う)
@@ -626,6 +639,7 @@ function switchWeapon(index){
   player.chargeFramesElapsed = 0;
   player.chargeCooldownFramesLeft = 0;
   player.squidLockoutFramesLeft = 0;
+  player.pendingChargeFire = false;
   player.chargeKeepActive = false;
   player.chargeKeepFramesLeft = 0;
   player.ckResurfaceDelayFramesLeft = 0;
@@ -707,6 +721,10 @@ stage.addEventListener('mousedown', e => {
       // 発生しない。フルチャージに満たない状態で潜伏した場合、チャージ
       // キープにはならず、溜めていたチャージそのものを失う。
       if (weapon.type === 'charger' && weapon.ckStats){
+        // イカ化する時点で「早離し後の自動発射待ち」は破棄する
+        // (スクイッドに入る＝チャージ操作自体を手放す操作なので、後から
+        // 勝手にノーチャージ弾が飛ぶのは不自然なため)。
+        player.pendingChargeFire = false;
         if (player.chargeFramesElapsed >= weapon.chargeFrames){
           player.chargeKeepActive = true;
           player.chargeKeepFramesLeft = weapon.ckStats.keepDurationFrames;
@@ -726,14 +744,22 @@ window.addEventListener('mouseup', e => {
     // 足元塗り・中間塗りのパターンは「連射し続けている間」の射撃回数を基準に
     // 進む固定パターンなので、トリガーを離したらカウントをリセットする。
     burstShotCount = 0;
-    // チャージャー種はここが「離した瞬間」＝発射トリガー。チャージ0なら
-    // 何も起きない(fireChargerShot側でガードする)。チャージキープ解除後の
-    // 再チャージ遅延(ckResurfaceDelayFramesLeft)が残っている間に離した
-    // 場合は、ここでは発射せず、その遅延が明けた瞬間にupdatePlayer()側で
-    // 自動的に発射される（この時点でmouse.downが既にfalseになっている
-    // ことがそのトリガーになる）。
+    // チャージャー種はここが「離した瞬間」＝発射トリガー…だが、実機は
+    // 「離した時点のチャージ量」で即座に不発になるわけではない。8F
+    // (minChargeFramesToFire)未満でしか溜まっていない状態で離した場合、
+    // ここでは発射せず、pendingChargeFireを立てて updatePlayer() 側で
+    // ヒト状態のままチャージを継続させる。8Fに到達した瞬間、そちらが
+    // 自動的にfireChargerShot()を呼ぶ(＝ノーチャージ弾が出る)。
+    // チャージキープ解除後の再チャージ遅延(ckResurfaceDelayFramesLeft)が
+    // 残っている間に離した場合は、ここでは発射せず、その遅延が明けた
+    // 瞬間にupdatePlayer()側で自動的に発射される（この時点でmouse.downが
+    // 既にfalseになっていることがそのトリガーになる）。
     if (weapon.type === 'charger' && player.ckResurfaceDelayFramesLeft <= 0 && player.charging){
-      fireChargerShot();
+      if (player.chargeFramesElapsed >= weapon.minChargeFramesToFire){
+        fireChargerShot();
+      } else {
+        player.pendingChargeFire = true;
+      }
     }
   }
   if (e.button === 2){
@@ -762,6 +788,7 @@ function resetPaint(){
   player.chargeFramesElapsed = 0;
   player.chargeCooldownFramesLeft = 0;
   player.squidLockoutFramesLeft = 0;
+  player.pendingChargeFire = false;
   player.chargeKeepActive = false;
   player.chargeKeepFramesLeft = 0;
   player.ckResurfaceDelayFramesLeft = 0;
@@ -1371,19 +1398,22 @@ function paintTrailDot(cx, cy, radiusAlongPx, radiusAcrossPx, angle){
   pctx.globalAlpha = 1;
 }
 
-// チャージャーの発射本体。mouseupハンドラから「離した瞬間」に1回だけ呼ばれる。
-// 弾速がシューターに比べて桁違いに速い(初速24〜96DU/F)ためヒットスキャン
+// チャージャーの発射本体。「離した瞬間、8F以上溜まっていた場合」の
+// mouseupハンドラ、または「8F未満で離した後、チャージが8Fに到達した瞬間」
+// のupdatePlayer()側の自動発射から、それぞれ1回だけ呼ばれる。弾速が
+// シューターに比べて桁違いに速い(初速24〜96DU/F)ためヒットスキャン
 // (瞬間着弾)として扱い、プレイヤー位置から照準方向へ小刻みに進めながら
 // 壁/ダミーへの当たり判定を先に解決してから、着弾点までまとめて塗りを行う。
 function fireChargerShot(){
   const weapon = WEAPONS[currentWeaponIndex];
   const frac = getChargeFraction();
   player.charging = false;
+  player.pendingChargeFire = false;
 
-  // ノーチャージの最低チャージ時間(minChargeFramesToFire=8F)に満たない
-  // うちに離した場合は不発扱い——資料の「チャージ時間: 8F(NC)」は
-  // 「NC相当の発射に必要な最短保持フレーム数」と解釈し、それ未満は
-  // チャージだけ失われて何も発射されない。
+  // ここに来るのは常にchargeFramesElapsed >= minChargeFramesToFireのはず
+  // (mouseupハンドラ・updatePlayer()の自動発射トリガーの両方がその条件を
+  // 満たしてから呼ぶため)。念のための保険としてこのガードは残しておく——
+  // 万が一0Fやそれ未満で呼ばれても、チャージを破棄するだけで何も発射しない。
   if (frac <= 0 || player.chargeFramesElapsed < weapon.minChargeFramesToFire){
     player.chargeFramesElapsed = 0;
     player.chargeKeepActive = false;
@@ -1584,7 +1614,15 @@ function updatePlayer(dt){
     if (player.chargeCooldownFramesLeft > 0){
       player.chargeCooldownFramesLeft = Math.max(0, player.chargeCooldownFramesLeft - dt * FPS);
     }
-    if (player.form === 'human' && mouse.down && player.chargeCooldownFramesLeft <= 0){
+    // wantsToCharge: 通常は左クリック押下中(mouse.down)。加えて、
+    // 「minChargeFramesToFire(8F)未満でZRを離した」直後は
+    // player.pendingChargeFireがtrueになっており、この間はマウスが
+    // 離されていてもヒト状態のままチャージを継続させる——実機の
+    // 「離すのが早すぎても、8F分のチャージは必ず消費してから発射される
+    // (不発にはならない)」という仕様の再現。8Fに到達した瞬間、下の
+    // if内で自動的にfireChargerShot()を呼んで発射する。
+    const wantsToCharge = mouse.down || player.pendingChargeFire;
+    if (player.form === 'human' && wantsToCharge && player.chargeCooldownFramesLeft <= 0){
       player.charging = true;
       const curFrac = getChargeFraction();
       const curInkCost = chargeLerp(weaponForMove.inkPerShotNoCharge, weaponForMove.inkPerShotFull, curFrac);
@@ -1595,6 +1633,14 @@ function updatePlayer(dt){
         weaponForMove.chargeFrames,
         player.chargeFramesElapsed + (dt * FPS) / slow
       );
+      // 早離し後の自動発射: pendingChargeFireが立っている間にチャージが
+      // minChargeFramesToFire(8F)へ到達したら、その場でノーチャージ相当の
+      // 弾を発射する。mouse.downは既にfalseのままなので、mouseupハンドラ
+      // 側ではなくこの経路だけが発射のトリガーになる。
+      if (player.pendingChargeFire && player.chargeFramesElapsed >= weaponForMove.minChargeFramesToFire){
+        player.pendingChargeFire = false;
+        fireChargerShot();
+      }
     } else {
       player.charging = false;
     }
@@ -2110,7 +2156,9 @@ function render(){
       ? '◆ イカ状態(自陣インク上)：移動速度UP／急速回復中'
       : '◆ イカ状態(インク外)：移動速度UP／回復は自然回復のみ';
   } else if (weaponNow.type === 'charger' && player.charging){
-    swimBadgeEl.textContent = '◆ ヒト状態：チャージ中(自然回復は停止)';
+    swimBadgeEl.textContent = player.pendingChargeFire
+      ? '◆ ヒト状態：チャージ中(自然回復は停止／早離し・8F到達で自動発射)'
+      : '◆ ヒト状態：チャージ中(自然回復は停止)';
   } else {
     swimBadgeEl.textContent = '◆ ヒト状態：自然回復のみ';
   }
