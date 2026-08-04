@@ -490,6 +490,17 @@ const WEAPONS = [
   //    そのままヒト状態で継続し、8Fへ到達した瞬間にノーチャージ相当の
   //    弾が自動的に発射される。この挙動を player.pendingChargeFire で
   //    表現している（詳細はplayer/updatePlayer/mouseupの各コメント参照）。
+  //  - 貫通(ピアシング): インクショットはヒト(ダミー)を貫通し、射程内で
+  //    あればダミーの奥まで届く(＝1発で複数対象にダメージ判定/ヒット判定
+  //    が可能なチャージャーの仕様)。地形(壁)だけは貫通しないため、壁に
+  //    当たった時点でショットはそこで止まる。fireChargerShot()内のマー
+  //    チングループを参照(壁でのみbreakし、ダミーヒットはhitDummyFlagを
+  //    立てるだけで継続する)。
+  //    一方、発射前のチャージ中に表示される照準レーザー(見える射線)は
+  //    実際の弾道とは別物で、地形にもヒト(ダミー)にも貫通せず、最初に
+  //    当たった地点で表示を止める(＝視認できるレーザー光線として不自然に
+  //    ならないようにするための見た目上の制約。computeLaserStopDistance()
+  //    参照)。
   // --------------------------------------------------------------------------
   {
     name: 'リッター4K',
@@ -1364,6 +1375,29 @@ function getChargeFraction(){
   return Math.min(player.chargeFramesElapsed / weapon.chargeFrames, 1);
 }
 
+// チャージ中に表示する照準レーザー(見える射線)の可視距離を求める。実際の
+// インクショット(fireChargerShot内のマーチング)はヒト(ダミー)を貫通する
+// が、これはあくまで着弾判定・塗り処理のロジック。レーザー"表示"は見える
+//光線なので、実機の見た目に合わせて地形(壁)にもヒト(ダミー)にも貫通させず、
+// 最初に当たった地点で止める。壁・ダミーいずれにも当たらなければ
+// maxDistPx(=現在のチャージ量に応じた射程)まで届く。
+function computeLaserStopDistance(maxDistPx, dirX, dirY, projRadiusTerrainPx, projRadiusEnemyPx){
+  const STEP = 4;
+  let dist = 0;
+  while (dist < maxDistPx){
+    const nextDist = dist + STEP;
+    const nx = player.x + dirX * nextDist;
+    const ny = player.y + dirY * nextDist;
+    if (nx < 0 || nx > W || ny < 0 || ny > H) return Math.min(dist, maxDistPx);
+    if (OBSTACLES.some(o => rectsOverlap(nx, ny, projRadiusTerrainPx, o))) return dist; // 地形で止める(貫通しない)
+    if (dummy.hp > 0 && Math.hypot(nx - dummy.x, ny - dummy.y) < dummy.radius + projRadiusEnemyPx){
+      return nextDist; // ヒト(ダミー)の位置で止める(貫通しない、実際のショットとは別扱い)
+    }
+    dist = nextDist;
+  }
+  return Math.min(dist, maxDistPx);
+}
+
 // だ円形の軌跡塗りブロブ用の点群生成。radiusAlongは進行方向(縦半径)、
 // radiusAcrossは進行方向に直交する幅(横半径)。blobPoints()の
 // stretchDir/stretchAmt(前方だけ伸びる非対称ストレッチ)とは違い、こちらは
@@ -1445,21 +1479,23 @@ function fireChargerShot(){
   const projRadiusEnemyPx = lines(weapon.projectileSizeEnemyLines) / 2;
   const projRadiusTerrainPx = lines(weapon.projectileSizeTerrainLines) / 2;
 
+  // 貫通仕様: リッター4Kのインクショットはヒト(ダミー)を貫通し、射程内で
+  // あればダミーの奥までそのまま届く。地形(壁)だけは貫通しないので、壁に
+  // 当たった時点でそこより先には進まない。ダミーへのヒット判定は一度だけ
+  // 記録し(hitDummyFlagで多重ヒットを防止)、その後もマーチングを続けて
+  // 着弾点(dist)を壁または最大距離(maxMarchPx)まで押し進める。
   const STEP = 4; // ヒットスキャン判定のマーチングステップ幅(px)
   let dist = 0;
   let hitDummyFlag = false;
-  let stoppedByWall = false;
   while (dist < maxMarchPx){
     const nextDist = dist + STEP;
     const nx = player.x + dirX * nextDist;
     const ny = player.y + dirY * nextDist;
     if (nx < 0 || nx > W || ny < 0 || ny > H) break;
-    if (OBSTACLES.some(o => rectsOverlap(nx, ny, projRadiusTerrainPx, o))){ stoppedByWall = true; break; }
-    if (nextDist <= hitRangePx && dummy.hp > 0 &&
+    if (OBSTACLES.some(o => rectsOverlap(nx, ny, projRadiusTerrainPx, o))) break; // 地形は貫通しない
+    if (!hitDummyFlag && nextDist <= hitRangePx && dummy.hp > 0 &&
         Math.hypot(nx - dummy.x, ny - dummy.y) < dummy.radius + projRadiusEnemyPx){
-      hitDummyFlag = true;
-      dist = nextDist;
-      break;
+      hitDummyFlag = true; // ヒットは記録するが、貫通するのでbreakしない
     }
     dist = nextDist;
   }
@@ -1962,13 +1998,22 @@ function render(){
   // （このプロトタイプは自チーム視点のみのため常時描画で代用）。線の色は
   // 自陣のインク色(TEAM_COLOR)を使う——陣営ごとにレーザー色が変わる、
   // という実機の見た目(オレンジ/パープル等)を再現するため。長さは現在の
-  // チャージ量に応じた射程(ライン)まで伸び、チャージが進むほど奥まで届く。
+  // チャージ量に応じた射程(ライン)まで伸びるが、実際のインクショットとは
+  // 異なりこのレーザー表示自体は地形にもヒト(ダミー)にも貫通しないため、
+  // 最初に何かへぶつかった地点でそこから先は描画しない
+  // (computeLaserStopDistance()参照)。
   const chargerAiming = weaponNow.type === 'charger' && player.form === 'human' && player.charging;
   if (chargerAiming){
     const laserFrac = getChargeFraction();
-    const laserRangePx = lines(chargeLerp(weaponNow.rangeLinesNoCharge, weaponNow.rangeLinesFull, laserFrac));
-    const laserEndX = player.x + Math.cos(player.aimAngle) * laserRangePx;
-    const laserEndY = player.y + Math.sin(player.aimAngle) * laserRangePx;
+    const laserMaxRangePx = lines(chargeLerp(weaponNow.rangeLinesNoCharge, weaponNow.rangeLinesFull, laserFrac));
+    const laserDirX = Math.cos(player.aimAngle), laserDirY = Math.sin(player.aimAngle);
+    const laserProjRadiusTerrainPx = weaponNow.projectileSizeTerrainLines !== undefined ? lines(weaponNow.projectileSizeTerrainLines) / 2 : 3;
+    const laserProjRadiusEnemyPx = weaponNow.projectileSizeEnemyLines !== undefined ? lines(weaponNow.projectileSizeEnemyLines) / 2 : 0;
+    const laserVisibleDist = computeLaserStopDistance(
+      laserMaxRangePx, laserDirX, laserDirY, laserProjRadiusTerrainPx, laserProjRadiusEnemyPx
+    );
+    const laserEndX = player.x + laserDirX * laserVisibleDist;
+    const laserEndY = player.y + laserDirY * laserVisibleDist;
     ctx.save();
     // 1) 外側の柔らかいハロー(太め・低不透明度・強いぼかし)
     ctx.strokeStyle = TEAM_COLOR;
