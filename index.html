@@ -1428,25 +1428,34 @@ function fireChargerShot(){
     paintTrailDot(dx0, dy0, radiusAlongPx * mult, radiusAcrossPx * mult, angle);
   }
 
-  // 塗りポイントの厳守: このブキは単発塗りポイントがwikiでノーチャージ6.6p
-  // 〜フルチャージ32.0pと明記されている。通常の塗りポイントは
-  // POINTS_PER_LINE_SQUARED経由の実面積比例計算(tickPaintPoints)に一本化
-  // してあるが、これは足元塗り・軌跡塗り・着弾先端塗りが重なった面積や、
-  // 既に自分のインクが乗っている場所に着弾した場合の重複を差し引く形の
-  // 「新規に塗れた面積」しか数えないため、サンプリング解像度やインクの
-  // 重なり具合によってはフルチャージでも32.0pちょうどには一致しない
-  // （多くの場合、着弾点付近で軌跡塗り・足元塗りと重なるぶん実際の新規
-  // 面積は名目値より小さくなる）。「フルチャージで32p」という数値を厳密に
-  // 保証するため、この一発ぶんはtickPaintPoints()を即時実行して実面積差分
-  // をいつも通りprevSampleMaskへ反映させたうえで（＝次回の定期サンプリング
-  // で同じインクが二重加算されないようにする）、その加算分を取り消して
-  // 単発塗りポイント(チャージ量で補間した値。フルチャージなら必ず32.0p)を
-  // 代わりに加算する。
+  // 塗りポイントの定義を2つとも守る:
+  //   (1) 1回塗った場所を重ねて撃っても加算されない(既存の面積差分ベースの
+  //       仕組みがこれを担保している — prevSampleMaskで「既に塗られていた
+  //       ピクセル」は新規扱いにならない)
+  //   (2) 塗りポイントの増分がマイナスになることは絶対にない
+  // このブキは単発塗りポイントがwikiでノーチャージ6.6p〜フルチャージ32.0p
+  // と明記されており、この値は「1発で塗れる上限」を表す公称値である。
+  // 面積差分ベースの実測値(tickPaintPoints)は、軌跡塗り・足元塗り・
+  // 着弾先端塗りが互いに重なる/自分の既存インクと重なる分だけ差し引かれる
+  // 一方で、単純な半径合計から見積もった「重ならなければこれだけ塗れる」
+  // 面積は公称値より大きく出ることがあり、そのまま「公称値をまるごと足す」
+  // 実装だと実測値が公称値を上回った回で差し引き分がマイナスになってしまう
+  // バグがあった（また、それだと(1)の「既に塗った場所には加算しない」定義
+  // にも反していた——実測値がほぼ0の場所を撃っても公称値がまるごと乗って
+  // しまうため）。
+  // そこで、実測の新規加算分(areaBasedDelta、常に0以上)を「公称値を上限
+  // としてそのまま使う」方式にする: 新規に塗れた面積が公称値以上なら公称値
+  // で頭打ち(=フルチャージなら32.0pがこの一発の上限)、新規面積が少ない
+  // （＝多くが塗り直しだった）場合は実測値のままなので、どちらの定義も
+  // 同時に満たせる。areaBasedDelta・nominalShotPointsはどちらも0以上なので
+  // Math.minの結果も必ず0以上——マイナスにはなり得ない。
   const pointsBeforeShot = totalPaintPoints;
   tickPaintPoints();
-  const areaBasedDelta = totalPaintPoints - pointsBeforeShot;
-  const nominalShotPoints = chargeLerp(weapon.singleShotPaintPointsNoCharge, weapon.singleShotPaintPointsFull, frac);
-  totalPaintPoints = pointsBeforeShot - areaBasedDelta + nominalShotPoints;
+  const areaBasedDelta = totalPaintPoints - pointsBeforeShot; // 常に0以上（新規に塗られたピクセルのみ加算されるため）
+  const nominalShotPoints = chargeLerp(weapon.singleShotPaintPointsNoCharge, weapon.singleShotPaintPointsFull, frac); // 1発の上限（フルチャージなら32.0p）
+  const creditedDelta = Math.min(areaBasedDelta, nominalShotPoints);
+  totalPaintPoints = pointsBeforeShot + creditedDelta;
+
 
   // 発射後隙: 資料により、次のチャージ開始まで(chargeRestartFrames)・
   // イカ化まで(squidLockoutFrames)・インク回復開始まで(inkRecoveryLockoutFrames、
