@@ -1927,18 +1927,18 @@ function render(){
     // 1) 外側の柔らかいハロー(太め・低不透明度・強いぼかし)
     ctx.strokeStyle = TEAM_COLOR;
     ctx.shadowColor = TEAM_COLOR;
-    ctx.shadowBlur = 26;
-    ctx.globalAlpha = 0.45;
-    ctx.lineWidth = 8;
+    ctx.shadowBlur = 18;
+    ctx.globalAlpha = 0.4;
+    ctx.lineWidth = 3.5;
     ctx.lineCap = 'round';
     ctx.beginPath();
     ctx.moveTo(player.x, player.y);
     ctx.lineTo(laserEndX, laserEndY);
     ctx.stroke();
     // 2) 中間の彩度の高い本体色レイヤー
-    ctx.shadowBlur = 16;
+    ctx.shadowBlur = 10;
     ctx.globalAlpha = 0.85;
-    ctx.lineWidth = 3.5;
+    ctx.lineWidth = 1.6;
     ctx.beginPath();
     ctx.moveTo(player.x, player.y);
     ctx.lineTo(laserEndX, laserEndY);
@@ -1946,9 +1946,9 @@ function render(){
     // 3) 中心の白く輝くコア(レーザーらしい高輝度の芯)
     ctx.strokeStyle = '#ffffff';
     ctx.shadowColor = '#ffffff';
-    ctx.shadowBlur = 10;
+    ctx.shadowBlur = 6;
     ctx.globalAlpha = 1;
-    ctx.lineWidth = 1.4;
+    ctx.lineWidth = 0.7;
     ctx.beginPath();
     ctx.moveTo(player.x, player.y);
     ctx.lineTo(laserEndX, laserEndY);
@@ -1966,14 +1966,16 @@ function render(){
     ctx.stroke();
   }
 
-  // チャージキープ中の潜伏を発光させる: 地面のリング状のグロー＋イカ本体の
-  // 縁を光らせる。持続時間(chargeKeepFramesLeft)が尽きるにつれて発光が
-  // 弱まっていき、0になった瞬間(=灯が消える瞬間)に完全に消える。
-  // 参考画像(実機のチャージキープ演出)に合わせ、以前よりかなり強い発光に
-  // している: (1)自陣インクの通り道自体をブルームさせるレイヤー、
-  // (2)プレイヤー中心の多層ハロー(白コア→チーム色→外縁のソフトな滲み)、
-  // (3)脈動(パルス)する明滅——を重ねる。pulse は sin波で 0.75〜1.0 を
-  // 往復する係数で、glowFade(残り時間による全体フェード)と乗算する。
+  // チャージキープ中の潜伏を発光させる（画像参照仕様）:
+  // 実機の見た目は「イカ本体そのものが強く発光する」のが主役で、地面側は
+  // その光がインク面にぼんやり映り込む程度——なので以前のような「地面の
+  // 帯全体をブルームさせる」演出は撤廃し、代わりに(1)インク面への光の映り
+  // 込み(プレイヤー位置中心のやわらかい反射グロー。イカが完全に潜って
+  // いて画面上イカ本体が見えない場合でも、光そのものはインク上に映る、
+  // という指定のため isSwimming の有無に関わらず常に描く)と、(2)イカ本体
+  // の発光(後述のプレイヤー描画ブロックで、白〜ピンクの明るいコア＋外周の
+  // チーム色ハローとして描画)の2段構成にする。持続時間(chargeKeepFramesLeft)
+  // が尽きるにつれてフェードし、0で完全に消える。pulseはsin波の脈動係数。
   const chargeKeepGlowing = weaponNow.type === 'charger' && player.form === 'squid' && player.chargeKeepActive;
   const glowFade = (chargeKeepGlowing && weaponNow.ckStats)
     ? Math.max(0, player.chargeKeepFramesLeft / weaponNow.ckStats.keepDurationFrames)
@@ -1984,44 +1986,23 @@ function render(){
     const intensity = glowFade * pulse;
 
     ctx.save();
-
-    // (1) 自陣インクの帯そのものを明るく光らせる: 'lighter'合成モードで
-    // paintLayerをもう一度、強く発光した色味で重ね描きする。これにより
-    // 参考画像のように「イカが泳いだ跡のインクそのものが青白く輝く」見た目
-    // になる——単にプレイヤー周辺だけを光らせるより実機の印象に近い。
     ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = 0.55 * intensity;
-    ctx.filter = 'blur(6px) brightness(1.8) saturate(1.3)';
-    ctx.drawImage(paintLayer, 0, 0);
-    ctx.filter = 'none';
-    ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'source-over';
 
-    // (2) プレイヤー中心の多層ハロー(以前よりずっと大きく・明るく)。
-    const ringRadius = player.radius * (6.5 + 1.2 * pulse);
-    const grad = ctx.createRadialGradient(player.x, player.y, 0, player.x, player.y, ringRadius);
-    grad.addColorStop(0, `rgba(255,255,255,${0.95 * intensity})`);
-    grad.addColorStop(0.22, `rgba(255,255,255,${0.6 * intensity})`);
-    grad.addColorStop(0.5, `rgba(${tr},${tg},${tb},${0.75 * intensity})`);
-    grad.addColorStop(0.8, `rgba(${tr},${tg},${tb},${0.28 * intensity})`);
-    grad.addColorStop(1, `rgba(${tr},${tg},${tb},0)`);
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.fillStyle = grad;
+    // インク面への光の映り込み: プレイヤー位置を中心にした、地面に落ちる
+    // 柔らかい反射グロー。中心はほんのりピンクがかった白、外側へチーム色
+    // にじんで消える——「イカ自体が光り、その光が塗られたインクの上に
+    // 映っている」印象を狙う。潜伏中(isSwimming)かどうかに関わらず描画する。
+    const groundRadius = player.radius * 5.5;
+    const groundGrad = ctx.createRadialGradient(player.x, player.y, 0, player.x, player.y, groundRadius);
+    groundGrad.addColorStop(0, `rgba(255,205,240,${0.5 * intensity})`);
+    groundGrad.addColorStop(0.4, `rgba(${tr},${tg},${tb},${0.32 * intensity})`);
+    groundGrad.addColorStop(1, `rgba(${tr},${tg},${tb},0)`);
+    ctx.fillStyle = groundGrad;
     ctx.beginPath();
-    ctx.arc(player.x, player.y, ringRadius, 0, Math.PI * 2);
+    ctx.arc(player.x, player.y, groundRadius, 0, Math.PI * 2);
     ctx.fill();
 
-    // (3) 輪郭のくっきりしたリング(実機のパリッとした光の縁を再現)。
-    ctx.strokeStyle = `rgba(255,255,255,${0.5 * intensity})`;
-    ctx.lineWidth = 2.5;
-    ctx.shadowColor = TEAM_COLOR;
-    ctx.shadowBlur = 24 * intensity;
-    ctx.beginPath();
-    ctx.arc(player.x, player.y, player.radius * (2.1 + 0.3 * pulse), 0, Math.PI * 2);
-    ctx.stroke();
-
     ctx.globalCompositeOperation = 'source-over';
-    ctx.shadowBlur = 0;
     ctx.restore();
   }
 
@@ -2031,21 +2012,59 @@ function render(){
   ctx.translate(player.x, player.y);
   ctx.rotate(player.aimAngle);
   const stretch = player.form === 'squid' ? 1.35 : 1;
-  ctx.scale(stretch, 1 / Math.sqrt(stretch));
+
+  // イカ本体の発光(画像参照): ハロー・コアはイカ本体のstretch変形の影響を
+  // 受けない真円として描くため、本体を塗るscale(stretch, 1/√stretch)の
+  // 外側(translate+rotateのみが効いている座標系)で描画する。
   if (chargeKeepGlowing && glowFade > 0){
+    const [tr, tg, tb] = TEAM_COLOR_RGB;
     const pulseBody = 0.8 + 0.2 * Math.sin(performance.now() / 130);
-    ctx.shadowColor = '#ffffff';
-    ctx.shadowBlur = 40 * glowFade * pulseBody;
+    const bodyIntensity = glowFade * pulseBody;
+
+    // 外側のチーム色ハロー(発光ブルーム) — 真円
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.shadowColor = `rgb(${tr},${tg},${tb})`;
+    ctx.shadowBlur = 26 * bodyIntensity;
+    ctx.fillStyle = `rgba(${tr},${tg},${tb},${0.55 * bodyIntensity})`;
+    ctx.beginPath();
+    ctx.arc(0, 0, player.radius * 1.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
   }
+
+  ctx.save();
+  ctx.scale(stretch, 1 / Math.sqrt(stretch));
   ctx.fillStyle = TEAM_COLOR;
   ctx.beginPath();
   ctx.arc(0, 0, player.radius, 0, Math.PI * 2);
   ctx.fill();
-  ctx.shadowBlur = 0;
-  ctx.fillStyle = '#fff4';
-  ctx.beginPath();
-  ctx.arc(player.radius * 0.4, 0, player.radius * 0.35, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.restore();
+
+  if (chargeKeepGlowing && glowFade > 0){
+    // 中心の明るいピンク〜白のコア発光(画像参照) — 真円
+    const pulseBody = 0.8 + 0.2 * Math.sin(performance.now() / 130);
+    const coreIntensity = glowFade * pulseBody;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const coreGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, player.radius * 0.9);
+    coreGrad.addColorStop(0, `rgba(255,255,255,${0.95 * coreIntensity})`);
+    coreGrad.addColorStop(0.45, `rgba(255,150,225,${0.8 * coreIntensity})`);
+    coreGrad.addColorStop(1, `rgba(255,150,225,0)`);
+    ctx.fillStyle = coreGrad;
+    ctx.beginPath();
+    ctx.arc(0, 0, player.radius * 0.9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  } else {
+    ctx.save();
+    ctx.scale(stretch, 1 / Math.sqrt(stretch));
+    ctx.fillStyle = '#fff4';
+    ctx.beginPath();
+    ctx.arc(player.radius * 0.4, 0, player.radius * 0.35, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
   ctx.restore();
 
 
