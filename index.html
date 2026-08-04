@@ -1587,7 +1587,15 @@ function updatePlayer(dt){
   // （＝チャージ中は白い帯(予測)が伸びるだけで、ゲージの緑残量自体は減らないが、
   // 　自然回復による裏側での増加も同時に止まる、という仕様）。
   const chargingNow = weapon0.type === 'charger' && player.charging;
-  if (!inLockout && !chargingNow){
+  // チャージキープ中の潜伏（イカ状態でチャージを保持している状態）は、
+  // チャージ操作自体こそ未実装（前隙29F等のCK専用タイミングは無い）だが、
+  // 「イカ化してもchargeFramesElapsedはリセットされずそのまま保持される」
+  // という挙動は既に成立している。この保持中はインクを"抱えて"いる状態
+  // として扱い、自陣インク上の急速回復を含めインク回復を一切無効化する
+  // （＝ヒト状態のチャージ中と同じ扱い）。イカ化不能ロック中(squidLockout)
+  // や発射直後でチャージが0に戻っていれば通常のイカ回復に戻る。
+  const chargeKeepingNow = weapon0.type === 'charger' && player.form === 'squid' && player.chargeFramesElapsed > 0;
+  if (!inLockout && !chargingNow && !chargeKeepingNow){
     // 急速回復はイカ状態でかつ自陣インク上のときだけ。ヒト状態は常に自然回復のみ。
     const rapidRegenActive = player.form === 'squid' && player.isSwimming;
     const regen = rapidRegenActive ? player.swimRegenRate : player.regenRate;
@@ -1843,7 +1851,6 @@ function render(){
   // 自陣のインク色(TEAM_COLOR)を使う——陣営ごとにレーザー色が変わる、
   // という実機の見た目(オレンジ/パープル等)を再現するため。長さは現在の
   // チャージ量に応じた射程(ライン)まで伸び、チャージが進むほど奥まで届く。
-  // 先端には小さな照準リングを描く。
   const chargerAiming = weaponNow.type === 'charger' && player.form === 'human' && player.charging;
   if (chargerAiming){
     const laserFrac = getChargeFraction();
@@ -1851,20 +1858,36 @@ function render(){
     const laserEndX = player.x + Math.cos(player.aimAngle) * laserRangePx;
     const laserEndY = player.y + Math.sin(player.aimAngle) * laserRangePx;
     ctx.save();
+    // 1) 外側の柔らかいハロー(太め・低不透明度・強いぼかし)
     ctx.strokeStyle = TEAM_COLOR;
     ctx.shadowColor = TEAM_COLOR;
-    ctx.shadowBlur = 8;
-    ctx.globalAlpha = 0.9;
-    ctx.lineWidth = 2;
+    ctx.shadowBlur = 26;
+    ctx.globalAlpha = 0.45;
+    ctx.lineWidth = 8;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(player.x, player.y);
+    ctx.lineTo(laserEndX, laserEndY);
+    ctx.stroke();
+    // 2) 中間の彩度の高い本体色レイヤー
+    ctx.shadowBlur = 16;
+    ctx.globalAlpha = 0.85;
+    ctx.lineWidth = 3.5;
+    ctx.beginPath();
+    ctx.moveTo(player.x, player.y);
+    ctx.lineTo(laserEndX, laserEndY);
+    ctx.stroke();
+    // 3) 中心の白く輝くコア(レーザーらしい高輝度の芯)
+    ctx.strokeStyle = '#ffffff';
+    ctx.shadowColor = '#ffffff';
+    ctx.shadowBlur = 10;
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = 1.4;
     ctx.beginPath();
     ctx.moveTo(player.x, player.y);
     ctx.lineTo(laserEndX, laserEndY);
     ctx.stroke();
     ctx.shadowBlur = 0;
-    ctx.globalAlpha = 1;
-    ctx.beginPath();
-    ctx.arc(laserEndX, laserEndY, 6, 0, Math.PI * 2);
-    ctx.stroke();
     ctx.restore();
   } else {
     // Aim guide, subtle.
@@ -1925,8 +1948,13 @@ function render(){
 
   // フォーム表示: ヒト状態は常に「自然回復のみ」。イカ状態は自陣インク上か
   // どうかで急速回復が効いているかが変わるので、それも合わせて表示する。
-  const rapidRegenActive = player.form === 'squid' && player.isSwimming;
-  if (player.form === 'squid'){
+  // ただしチャージキープ中(イカ状態でチャージ保持中)は自陣インク上でも
+  // 回復自体が無効化されるので、その旨を優先して表示する。
+  const chargeKeepingDisplay = weaponNow.type === 'charger' && player.form === 'squid' && player.chargeFramesElapsed > 0;
+  const rapidRegenActive = player.form === 'squid' && player.isSwimming && !chargeKeepingDisplay;
+  if (chargeKeepingDisplay){
+    swimBadgeEl.textContent = '◆ イカ状態(チャージキープ中)：インク回復は無効';
+  } else if (player.form === 'squid'){
     swimBadgeEl.textContent = rapidRegenActive
       ? '◆ イカ状態(自陣インク上)：移動速度UP／急速回復中'
       : '◆ イカ状態(インク外)：移動速度UP／回復は自然回復のみ';
