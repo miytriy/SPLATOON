@@ -1393,23 +1393,34 @@ function fireChargerShot(){
   // 記載が無かったため)。
   paintSplatClipped(player.x, player.y, lines(weapon.footPaintRadiusLines));
 
-  // 軌跡塗り: プレイヤー〜着弾点の間にdropCount個のだ円ブロブを均等配置。
-  // 最後の1粒(着弾直前)だけtrailTipRadiusMultiplier倍の大きさにする。
-  const dropCount = Math.max(0, Math.round(chargeLerp(weapon.trailDropCountNoCharge, weapon.trailDropCountFull, frac)));
+  // 軌跡塗り: プレイヤー〜着弾点の間にdropCount個のブロブを均等配置する。
+  // wikiの「軌跡塗り発生数」は経路上のドロップ総数として記載されており、
+  // 着弾点そのものに置かれる最後の1個（＝着弾先端塗り）もこの総数に含まれる。
+  // 以前の実装は「経路上のdropCount個のだ円ブロブ(着弾点には届かない)」
+  // ＋「着弾点に別枠で足す先端splat」という二重構成になっており、実際の
+  // 描画数がdropCount+1個（フルチャージなら13+1=14個）になってしまって
+  // いたバグを修正: 最後の1個(i===dropCount)を着弾点(endX,endY)に置く
+  // 円形splat（着弾時の先端塗り半径テーブルの値を使用）として扱い、
+  // 別枠で追加していた着弾先端塗りをここに統合した。これで経路上の総ブロブ
+  // 数は常にdropCount個ちょうどになる。着弾"直前"の1個(i===dropCount-1)には
+  // 引き続きtrailTipRadiusMultiplier(1.5倍)を適用する。
+  const dropCount = Math.max(1, Math.round(chargeLerp(weapon.trailDropCountNoCharge, weapon.trailDropCountFull, frac)));
   const radiusAcrossPx = lines(chargeLerp(weapon.trailRadiusHorizontalNoCharge, weapon.trailRadiusHorizontalFull, frac));
   const radiusAlongPx = lines(chargeLerp(weapon.trailRadiusVerticalNoCharge, weapon.trailRadiusVerticalFull, frac));
+  const tipRadiusPx = lines(chargeLerp(weapon.tipSplatRadiusNoCharge, weapon.tipSplatRadiusFull, frac));
   for (let i = 1; i <= dropCount; i++){
-    const t = i / (dropCount + 1);
+    if (i === dropCount){
+      // 着弾先端塗り: 経路上の最後の1個は着弾点そのものに置く円形splat。
+      paintSplatClipped(endX, endY, tipRadiusPx);
+      continue;
+    }
+    const t = i / dropCount;
     const dx0 = player.x + (endX - player.x) * t;
     const dy0 = player.y + (endY - player.y) * t;
-    const isTip = (i === dropCount);
-    const mult = isTip ? weapon.trailTipRadiusMultiplier : 1;
+    const isPreLanding = (i === dropCount - 1);
+    const mult = isPreLanding ? weapon.trailTipRadiusMultiplier : 1;
     paintTrailDot(dx0, dy0, radiusAlongPx * mult, radiusAcrossPx * mult, angle);
   }
-
-  // 着弾先端塗り: 着弾点に円形のsplat。
-  const tipRadiusPx = lines(chargeLerp(weapon.tipSplatRadiusNoCharge, weapon.tipSplatRadiusFull, frac));
-  paintSplatClipped(endX, endY, tipRadiusPx);
 
   // 発射後隙: 資料により、次のチャージ開始まで(chargeRestartFrames)・
   // イカ化まで(squidLockoutFrames)・インク回復開始まで(inkRecoveryLockoutFrames、
