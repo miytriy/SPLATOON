@@ -577,6 +577,10 @@ const player = {
   charging: false,         // 左クリックを押し続けてチャージ中か
   chargeCooldownFramesLeft: 0, // 発射後、次のチャージを開始できるまでの残りフレーム数
   squidLockoutFramesLeft: 0,   // 発射後、イカ状態になれるまでの残りフレーム数(リッター4Kのsquidロック用)
+  // --- チャージキープ(CK)関連 ---
+  chargeKeepActive: false,      // フルチャージ後に潜伏して発生した「本物の」チャージキープ中か
+  chargeKeepFramesLeft: 0,      // チャージキープの残り持続フレーム数(潜伏中のみ減少。0で灯が消えチャージも失う)
+  ckResurfaceDelayFramesLeft: 0, // チャージキープ解除(浮上)後、発射可能になるまでの残りフレーム数(前隙29F+チャージ1F)
 };
 
 // 装備中のブキのweightClass（非射撃時ヒト速・イカ速×2種）とshootMoveSpeedDU
@@ -622,6 +626,9 @@ function switchWeapon(index){
   player.chargeFramesElapsed = 0;
   player.chargeCooldownFramesLeft = 0;
   player.squidLockoutFramesLeft = 0;
+  player.chargeKeepActive = false;
+  player.chargeKeepFramesLeft = 0;
+  player.ckResurfaceDelayFramesLeft = 0;
   updateWeaponDisplay();
   updateWeaponSwitchButtons();
   const chargeWrapEl = document.getElementById('charge-wrap');
@@ -694,23 +701,52 @@ stage.addEventListener('mousedown', e => {
   if (e.button === 2){
     // イカ化不能ロック中(発射後squidLockoutFrames)は右クリック長押しでも
     // イカ状態に入れない — リッター4Kの発射後隙(16F)を再現するための制約。
-    if (player.squidLockoutFramesLeft <= 0) player.form = 'squid';
+    if (player.squidLockoutFramesLeft <= 0){
+      const weapon = WEAPONS[currentWeaponIndex];
+      // チャージキープの定義: フルチャージが完了してからの潜伏でないと
+      // 発生しない。フルチャージに満たない状態で潜伏した場合、チャージ
+      // キープにはならず、溜めていたチャージそのものを失う。
+      if (weapon.type === 'charger' && weapon.ckStats){
+        if (player.chargeFramesElapsed >= weapon.chargeFrames){
+          player.chargeKeepActive = true;
+          player.chargeKeepFramesLeft = weapon.ckStats.keepDurationFrames;
+        } else {
+          player.chargeFramesElapsed = 0;
+          player.chargeKeepActive = false;
+        }
+      }
+      player.form = 'squid';
+    }
   }
 });
 window.addEventListener('mouseup', e => {
+  const weapon = WEAPONS[currentWeaponIndex];
   if (e.button === 0) {
     mouse.down = false;
     // 足元塗り・中間塗りのパターンは「連射し続けている間」の射撃回数を基準に
     // 進む固定パターンなので、トリガーを離したらカウントをリセットする。
     burstShotCount = 0;
     // チャージャー種はここが「離した瞬間」＝発射トリガー。チャージ0なら
-    // 何も起きない(fireChargerShot側でガードする)。
-    const weapon = WEAPONS[currentWeaponIndex];
-    if (weapon.type === 'charger' && player.charging){
+    // 何も起きない(fireChargerShot側でガードする)。チャージキープ解除後の
+    // 再チャージ遅延(ckResurfaceDelayFramesLeft)が残っている間に離した
+    // 場合は、ここでは発射せず、その遅延が明けた瞬間にupdatePlayer()側で
+    // 自動的に発射される（この時点でmouse.downが既にfalseになっている
+    // ことがそのトリガーになる）。
+    if (weapon.type === 'charger' && player.ckResurfaceDelayFramesLeft <= 0 && player.charging){
       fireChargerShot();
     }
   }
-  if (e.button === 2) player.form = 'human'; // 右クリックを離すとヒト状態に戻る
+  if (e.button === 2){
+    // チャージキープ中に浮上(右クリックを離す)した場合だけ、専用の
+    // 再チャージ遅延(チャージ前隙29F＋チャージ時間1F)を発生させる。
+    // チャージキープに至っていなかった通常の潜伏からの復帰では、この
+    // 遅延は発生しない(通常通りヒト状態でチャージし直す)。
+    if (weapon.type === 'charger' && weapon.ckStats && player.chargeKeepActive){
+      player.ckResurfaceDelayFramesLeft = weapon.ckStats.chargePreDelaySquidFrames + weapon.ckStats.chargeFrames;
+    }
+    player.chargeKeepActive = false;
+    player.form = 'human'; // 右クリックを離すとヒト状態に戻る
+  }
 });
 // ブラウザ標準の右クリックメニューはイカ状態トグルの邪魔になるので抑制する。
 stage.addEventListener('contextmenu', e => e.preventDefault());
@@ -726,6 +762,9 @@ function resetPaint(){
   player.chargeFramesElapsed = 0;
   player.chargeCooldownFramesLeft = 0;
   player.squidLockoutFramesLeft = 0;
+  player.chargeKeepActive = false;
+  player.chargeKeepFramesLeft = 0;
+  player.ckResurfaceDelayFramesLeft = 0;
 }
 
 // --------------------------------------------------------------------------
@@ -1347,6 +1386,9 @@ function fireChargerShot(){
   // チャージだけ失われて何も発射されない。
   if (frac <= 0 || player.chargeFramesElapsed < weapon.minChargeFramesToFire){
     player.chargeFramesElapsed = 0;
+    player.chargeKeepActive = false;
+    player.chargeKeepFramesLeft = 0;
+    player.ckResurfaceDelayFramesLeft = 0;
     return;
   }
 
@@ -1470,6 +1512,9 @@ function fireChargerShot(){
   player.chargeCooldownFramesLeft = weapon.shotDelayFrames + weapon.chargeRestartFrames;
   player.squidLockoutFramesLeft = weapon.shotDelayFrames + weapon.squidLockoutFrames;
   player.chargeFramesElapsed = 0;
+  player.chargeKeepActive = false;
+  player.chargeKeepFramesLeft = 0;
+  player.ckResurfaceDelayFramesLeft = 0;
   // インク回復ロックアウトは既存の汎用機構(updatePlayer内、weapon.inkRecoveryLockoutFrames
   // とlastShotAtを見る)をそのまま使うため、シューターの発射と同じくlastShotAt
   // を更新しておく。
@@ -1515,6 +1560,27 @@ function updatePlayer(dt){
   // チャージャー種のチャージ蓄積: イカ状態では今回は未実装のためチャージ
   // 不可(押していても溜まらない)。クールダウン中(発射直後)も同様に不可。
   if (weaponForMove.type === 'charger'){
+    // チャージキープ持続時間のカウントダウン: 潜伏中のみ減少する。0になると
+    // 「イカ状態のときの灯が消えると同時にチャージキープ状態が解除される」
+    // ——このときチャージそのものも失われる。
+    if (player.chargeKeepActive && player.form === 'squid'){
+      player.chargeKeepFramesLeft = Math.max(0, player.chargeKeepFramesLeft - dt * FPS);
+      if (player.chargeKeepFramesLeft <= 0){
+        player.chargeKeepActive = false;
+        player.chargeFramesElapsed = 0;
+      }
+    }
+    // チャージキープ解除(浮上)後の再チャージ遅延(チャージ前隙29F＋
+    // チャージ時間1F)。フォームに関わらずカウントダウンし、0になった
+    // 時点で既に左クリックが離されていれば(mouse.downがfalse)その場で
+    // 自動発射する——まだ押されたままなら、通常の左クリックmouseup
+    // ハンドラ側の発射に委ねる。
+    if (player.ckResurfaceDelayFramesLeft > 0){
+      player.ckResurfaceDelayFramesLeft = Math.max(0, player.ckResurfaceDelayFramesLeft - dt * FPS);
+      if (player.ckResurfaceDelayFramesLeft <= 0 && !mouse.down){
+        fireChargerShot();
+      }
+    }
     if (player.chargeCooldownFramesLeft > 0){
       player.chargeCooldownFramesLeft = Math.max(0, player.chargeCooldownFramesLeft - dt * FPS);
     }
@@ -1594,7 +1660,7 @@ function updatePlayer(dt){
   // として扱い、自陣インク上の急速回復を含めインク回復を一切無効化する
   // （＝ヒト状態のチャージ中と同じ扱い）。イカ化不能ロック中(squidLockout)
   // や発射直後でチャージが0に戻っていれば通常のイカ回復に戻る。
-  const chargeKeepingNow = weapon0.type === 'charger' && player.form === 'squid' && player.chargeFramesElapsed > 0;
+  const chargeKeepingNow = weapon0.type === 'charger' && player.form === 'squid' && player.chargeKeepActive;
   if (!inLockout && !chargingNow && !chargeKeepingNow){
     // 急速回復はイカ状態でかつ自陣インク上のときだけ。ヒト状態は常に自然回復のみ。
     const rapidRegenActive = player.form === 'squid' && player.isSwimming;
@@ -1900,6 +1966,28 @@ function render(){
     ctx.stroke();
   }
 
+  // チャージキープ中の潜伏を発光させる: 地面のリング状のグロー＋イカ本体の
+  // 縁を光らせる。持続時間(chargeKeepFramesLeft)が尽きるにつれて発光が
+  // 弱まっていき、0になった瞬間(=灯が消える瞬間)に完全に消える。
+  const chargeKeepGlowing = weaponNow.type === 'charger' && player.form === 'squid' && player.chargeKeepActive;
+  const glowFade = (chargeKeepGlowing && weaponNow.ckStats)
+    ? Math.max(0, player.chargeKeepFramesLeft / weaponNow.ckStats.keepDurationFrames)
+    : 0;
+  if (chargeKeepGlowing && glowFade > 0){
+    const [tr, tg, tb] = TEAM_COLOR_RGB;
+    const ringRadius = player.radius * 3.2;
+    const grad = ctx.createRadialGradient(player.x, player.y, 0, player.x, player.y, ringRadius);
+    grad.addColorStop(0, `rgba(255,255,255,${0.6 * glowFade})`);
+    grad.addColorStop(0.4, `rgba(${tr},${tg},${tb},${0.5 * glowFade})`);
+    grad.addColorStop(1, `rgba(${tr},${tg},${tb},0)`);
+    ctx.save();
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, ringRadius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
   // Player: a squid-like teardrop that stretches slightly while swimming,
   // just enough to make the state change legible at a glance.
   ctx.save();
@@ -1907,15 +1995,21 @@ function render(){
   ctx.rotate(player.aimAngle);
   const stretch = player.form === 'squid' ? 1.35 : 1;
   ctx.scale(stretch, 1 / Math.sqrt(stretch));
+  if (chargeKeepGlowing && glowFade > 0){
+    ctx.shadowColor = TEAM_COLOR;
+    ctx.shadowBlur = 22 * glowFade;
+  }
   ctx.fillStyle = TEAM_COLOR;
   ctx.beginPath();
   ctx.arc(0, 0, player.radius, 0, Math.PI * 2);
   ctx.fill();
+  ctx.shadowBlur = 0;
   ctx.fillStyle = '#fff4';
   ctx.beginPath();
   ctx.arc(player.radius * 0.4, 0, player.radius * 0.35, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
+
 
   inkGaugeEl.style.width = (player.ink / player.maxInk * 100) + '%';
 
@@ -1950,7 +2044,7 @@ function render(){
   // どうかで急速回復が効いているかが変わるので、それも合わせて表示する。
   // ただしチャージキープ中(イカ状態でチャージ保持中)は自陣インク上でも
   // 回復自体が無効化されるので、その旨を優先して表示する。
-  const chargeKeepingDisplay = weaponNow.type === 'charger' && player.form === 'squid' && player.chargeFramesElapsed > 0;
+  const chargeKeepingDisplay = weaponNow.type === 'charger' && player.form === 'squid' && player.chargeKeepActive;
   const rapidRegenActive = player.form === 'squid' && player.isSwimming && !chargeKeepingDisplay;
   if (chargeKeepingDisplay){
     swimBadgeEl.textContent = '◆ イカ状態(チャージキープ中)：インク回復は無効';
