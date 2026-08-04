@@ -524,7 +524,13 @@ const WEAPONS = [
     trailRadiusVerticalNoCharge: 0.65, trailRadiusVerticalFull: 0.37,    // 軌跡塗りの縦半径(進行方向)
     trailDropCountNoCharge: 3, trailDropCountFull: 13,        // 軌跡塗り発生数
     trailTipRadiusMultiplier: 1.5,    // 軌跡塗りの先端(着弾直前の一粒)の半径倍率
-    tipSplatRadiusNoCharge: 0.21, tipSplatRadiusFull: 0.77,   // 着弾時の先端塗り半径
+    // 着弾時の先端塗り半径: wiki記載値(0.21→0.77)だと画面上でやや大きく
+    // 見えたため、見た目調整として一回り小さく(0.16→0.60、約25%減)して
+    // ある。塗りポイントはこの見た目上の面積からではなく単発塗りポイント
+    // (singleShotPaintPointsNoCharge/Full)を直接加算する方式に変更した
+    // ため(fireChargerShot()末尾の塗りポイント加算処理を参照)、この半径を
+    // 縮めてもスコアには影響しない。
+    tipSplatRadiusNoCharge: 0.16, tipSplatRadiusFull: 0.60,
     // 以下は参考値（このシミュレーションでは他の値から実質的に再現される
     // 派生統計であり、直接は計算に使っていない）:
     //   連射フレーム: 14F(0.233s, ノーチャージ) 〜 98F(1.633s, フルチャージ)
@@ -1421,6 +1427,26 @@ function fireChargerShot(){
     const mult = isPreLanding ? weapon.trailTipRadiusMultiplier : 1;
     paintTrailDot(dx0, dy0, radiusAlongPx * mult, radiusAcrossPx * mult, angle);
   }
+
+  // 塗りポイントの厳守: このブキは単発塗りポイントがwikiでノーチャージ6.6p
+  // 〜フルチャージ32.0pと明記されている。通常の塗りポイントは
+  // POINTS_PER_LINE_SQUARED経由の実面積比例計算(tickPaintPoints)に一本化
+  // してあるが、これは足元塗り・軌跡塗り・着弾先端塗りが重なった面積や、
+  // 既に自分のインクが乗っている場所に着弾した場合の重複を差し引く形の
+  // 「新規に塗れた面積」しか数えないため、サンプリング解像度やインクの
+  // 重なり具合によってはフルチャージでも32.0pちょうどには一致しない
+  // （多くの場合、着弾点付近で軌跡塗り・足元塗りと重なるぶん実際の新規
+  // 面積は名目値より小さくなる）。「フルチャージで32p」という数値を厳密に
+  // 保証するため、この一発ぶんはtickPaintPoints()を即時実行して実面積差分
+  // をいつも通りprevSampleMaskへ反映させたうえで（＝次回の定期サンプリング
+  // で同じインクが二重加算されないようにする）、その加算分を取り消して
+  // 単発塗りポイント(チャージ量で補間した値。フルチャージなら必ず32.0p)を
+  // 代わりに加算する。
+  const pointsBeforeShot = totalPaintPoints;
+  tickPaintPoints();
+  const areaBasedDelta = totalPaintPoints - pointsBeforeShot;
+  const nominalShotPoints = chargeLerp(weapon.singleShotPaintPointsNoCharge, weapon.singleShotPaintPointsFull, frac);
+  totalPaintPoints = pointsBeforeShot - areaBasedDelta + nominalShotPoints;
 
   // 発射後隙: 資料により、次のチャージ開始まで(chargeRestartFrames)・
   // イカ化まで(squidLockoutFrames)・インク回復開始まで(inkRecoveryLockoutFrames、
