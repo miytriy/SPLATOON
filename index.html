@@ -286,12 +286,14 @@ const WEAPONS = [
     fireIntervalSec: framesToSeconds(6),  // 連射フレーム 6F = 0.100s exactly
     inkPerShot: 100 / 108,                // インク消費量 0.92%（装弾数108発）
     // 単発塗りポイント: 地面と並行に1発ずつ射撃して得られた塗りポイントの
-    // 平均を、ナワバリバトルの塗りポイントカウンターを用いて算出した公称値。
-    // 現在の塗りポイントは「ブキ固有の単発塗りポイント」を経由しない実面積
-    // 比例の共通換算方式(POINTS_PER_LINE_SQUARED、tickPaintPoints()参照)を
-    // 採用しているため計算には使わないが、シミュレーションが実際にこの値へ
-    // どれだけ近づくか（地面と並行に単発撃ちしてHUDの塗りポイント増分を見る）
-    // を検証するための参照値として保持しておく。
+    // 平均を、ナワバリバトルの塗りポイントカウンターを用いて算出した公称値
+    // (4.0p)。この値は「1発で塗れる上限」として厳守する: 実面積比例の
+    // 換算方式(POINTS_PER_LINE_SQUARED、tickPaintPoints()参照)で計算した
+    // 実際の新規塗り面積ぶんの点数と、この公称値の小さい方を採用する
+    // (updateProjectiles()内、着弾/命中時のcreditCappedPaintPoints()呼び
+    // 出しを参照)。これにより「新規面積が公称値を超えても公称値で頭打ち」
+    // 「既に塗った場所を撃っても加算されない(実面積側がほぼ0になるため)」
+    // 「加算がマイナスになることはない」の3つを同時に満たす。
     singleShotPaintPoints: 4.0,
     speedDU: 22.66,                       // 初速 (initial shot speed, DU/F)
     shootMoveSpeedDU: 0.72,               // 射撃時ヒト速 — ブキ固有データ（重量級カテゴリ非依存）
@@ -434,6 +436,9 @@ const WEAPONS = [
     midPaintIntervalLines: 1.9,
     midPaintAvgPerShot: 1.4,
     midPaintRadiusLines: 0.30,
+    // 単発塗りポイント: スプラシューターと同じ仕組みで「1発で塗れる上限」
+    // として厳守する(4.5p。creditCappedPaintPoints()参照)。
+    singleShotPaintPoints: 4.5,
   },
   // --------------------------------------------------------------------------
   // リッター4K — シューター種とは別の「チャージャー種」。左クリックを押し
@@ -1244,12 +1249,14 @@ function updateProjectiles(dt){
       }
       paintSplatClipped(nx, ny, splatRadius, dirAngle, stretch);
       paintMidDots(weapon, p.startX, p.startY, nx, ny, p.burstShotIndex);
+      creditCappedPaintPoints(weapon.singleShotPaintPoints);
       p.alive = false;
     } else if (hitWall || outOfRange || outOfBounds || stalled) {
       const landX = Math.min(Math.max(nx, 0), W);
       const landY = Math.min(Math.max(ny, 0), H);
       paintSplatClipped(landX, landY, splatRadius, dirAngle, stretch);
       paintMidDots(weapon, p.startX, p.startY, landX, landY, p.burstShotIndex);
+      creditCappedPaintPoints(weapon.singleShotPaintPoints);
       p.alive = false;
     } else {
       p.x = nx; p.y = ny;
@@ -1445,19 +1452,12 @@ function fireChargerShot(){
   // 実装だと実測値が公称値を上回った回で差し引き分がマイナスになってしまう
   // バグがあった（また、それだと(1)の「既に塗った場所には加算しない」定義
   // にも反していた——実測値がほぼ0の場所を撃っても公称値がまるごと乗って
-  // しまうため）。
-  // そこで、実測の新規加算分(areaBasedDelta、常に0以上)を「公称値を上限
-  // としてそのまま使う」方式にする: 新規に塗れた面積が公称値以上なら公称値
-  // で頭打ち(=フルチャージなら32.0pがこの一発の上限)、新規面積が少ない
-  // （＝多くが塗り直しだった）場合は実測値のままなので、どちらの定義も
-  // 同時に満たせる。areaBasedDelta・nominalShotPointsはどちらも0以上なので
-  // Math.minの結果も必ず0以上——マイナスにはなり得ない。
-  const pointsBeforeShot = totalPaintPoints;
-  tickPaintPoints();
-  const areaBasedDelta = totalPaintPoints - pointsBeforeShot; // 常に0以上（新規に塗られたピクセルのみ加算されるため）
+  // しまうため）。共通ヘルパーcreditCappedPaintPoints()（実測値と公称値の
+  // 小さい方だけを加算する）に一本化してある。シューター種(スプラシュー
+  // ター・わかばシューター)の着弾時にも同じヘルパーを使っている
+  // (updateProjectiles()参照)。
   const nominalShotPoints = chargeLerp(weapon.singleShotPaintPointsNoCharge, weapon.singleShotPaintPointsFull, frac); // 1発の上限（フルチャージなら32.0p）
-  const creditedDelta = Math.min(areaBasedDelta, nominalShotPoints);
-  totalPaintPoints = pointsBeforeShot + creditedDelta;
+  creditCappedPaintPoints(nominalShotPoints);
 
 
   // 発射後隙: 資料により、次のチャージ開始まで(chargeRestartFrames)・
@@ -1663,6 +1663,25 @@ function tickPaintPoints(){
   return totalPaintPoints;
 }
 
+// 単発塗りポイントの上限を厳守するための共通ヘルパー。ブキ固有の公称値
+// (nominalPoints — 例: スプラシューター4.0p、わかばシューター4.5p、
+// リッター4Kはチャージ量で補間した値)は「1発で塗れる上限」を表す。
+// tickPaintPoints()をその場で呼んで実面積比例の実測加算分(0以上)を求め、
+// その実測値と公称値の小さい方だけを実際にtotalPaintPointsへ反映する:
+//   - 新規面積が公称値以上 → 公称値で頭打ち
+//   - 既に塗った場所ばかりで新規面積がほぼ0 → 実測値のまま(≒加算されない)
+//   - 実測値・公称値のどちらも0以上なので、結果が負になることはない
+// tickPaintPoints()自体は毎回prevSampleMaskを更新するので、ここで消費した
+// 新規面積が後続の定期サンプリング(setInterval)で二重加算されることもない。
+function creditCappedPaintPoints(nominalPoints){
+  if (nominalPoints === undefined) return;
+  const before = totalPaintPoints;
+  tickPaintPoints();
+  const areaBasedDelta = totalPaintPoints - before; // 常に0以上
+  const credited = Math.min(areaBasedDelta, nominalPoints);
+  totalPaintPoints = before + credited;
+}
+
 const coverageValueEl = document.getElementById('coverage-value');
 const inkGaugeEl = document.getElementById('ink-gauge-inner');
 const inkPredictBandEl = document.getElementById('ink-predict-band');
@@ -1818,14 +1837,45 @@ function render(){
     ctx.stroke();
   }
 
-  // Aim guide, subtle.
-  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(player.x, player.y);
-  ctx.lineTo(player.x + Math.cos(player.aimAngle) * 40,
-             player.y + Math.sin(player.aimAngle) * 40);
-  ctx.stroke();
+  // チャージャー種の定義: チャージ中は予測線（見える射線・チャージレーザー）
+  // を表示する。実機では味方・敵の両方から見える情報として扱われる
+  // （このプロトタイプは自チーム視点のみのため常時描画で代用）。線の色は
+  // 自陣のインク色(TEAM_COLOR)を使う——陣営ごとにレーザー色が変わる、
+  // という実機の見た目(オレンジ/パープル等)を再現するため。長さは現在の
+  // チャージ量に応じた射程(ライン)まで伸び、チャージが進むほど奥まで届く。
+  // 先端には小さな照準リングを描く。
+  const chargerAiming = weaponNow.type === 'charger' && player.form === 'human' && player.charging;
+  if (chargerAiming){
+    const laserFrac = getChargeFraction();
+    const laserRangePx = lines(chargeLerp(weaponNow.rangeLinesNoCharge, weaponNow.rangeLinesFull, laserFrac));
+    const laserEndX = player.x + Math.cos(player.aimAngle) * laserRangePx;
+    const laserEndY = player.y + Math.sin(player.aimAngle) * laserRangePx;
+    ctx.save();
+    ctx.strokeStyle = TEAM_COLOR;
+    ctx.shadowColor = TEAM_COLOR;
+    ctx.shadowBlur = 8;
+    ctx.globalAlpha = 0.9;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(player.x, player.y);
+    ctx.lineTo(laserEndX, laserEndY);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.arc(laserEndX, laserEndY, 6, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  } else {
+    // Aim guide, subtle.
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(player.x, player.y);
+    ctx.lineTo(player.x + Math.cos(player.aimAngle) * 40,
+               player.y + Math.sin(player.aimAngle) * 40);
+    ctx.stroke();
+  }
 
   // Player: a squid-like teardrop that stretches slightly while swimming,
   // just enough to make the state change legible at a glance.
