@@ -82,6 +82,25 @@
   #weapon-switch{ display:flex; gap:6px; }
   #weapon-switch button{ padding:4px 10px; }
   #weapon-switch button.active{ border-color: var(--ink); color: var(--ink); }
+
+  #sp-gauge-outer{
+    width:120px; height:8px; border-radius:4px; background:#0b0c10;
+    overflow:hidden; margin-top:4px; border:1px solid #33384a;
+  }
+  #sp-gauge-inner{
+    height:100%; width:0%; background: linear-gradient(90deg, #1a8f7a, var(--accent));
+    transition: width .08s linear;
+  }
+  #sp-gauge-outer.ready{
+    border-color: #fff2a8;
+    box-shadow: 0 0 8px 1px rgba(255,242,168,0.7);
+    animation: sp-pulse 0.9s ease-in-out infinite;
+  }
+  @keyframes sp-pulse{
+    0%,100%{ box-shadow: 0 0 6px 0 rgba(255,242,168,0.5); }
+    50%{ box-shadow: 0 0 14px 3px rgba(255,242,168,0.95); }
+  }
+  #sub-status{ font-size:10px; color: var(--muted); margin-top:4px; }
 </style>
 </head>
 <body>
@@ -111,6 +130,9 @@
         <div id="coverage-label">インク残量</div>
         <div id="ink-gauge-outer"><div id="ink-gauge-inner"></div><div id="ink-predict-band"></div></div>
         <div id="swim-badge">◆ ヒト状態：自然回復のみ</div>
+        <div id="coverage-label" style="margin-top:8px;">スペシャルゲージ</div>
+        <div id="sp-gauge-outer"><div id="sp-gauge-inner"></div></div>
+        <div id="sub-status">サブ: –</div>
       </div>
     </div>
   </div>
@@ -118,9 +140,11 @@
     <div><kbd>W A S D</kbd> 移動</div>
     <div><kbd>マウス</kbd> 照準　<kbd>左クリック(長押し)</kbd> 発射／チャージャーはチャージして離すと発射(ヒト状態のみ)</div>
     <div><kbd>右クリック(長押し)</kbd> イカ状態(左クリック無効・自陣インク上で急速回復)</div>
-    <div><kbd>Shift(長押し)</kbd> 照準ロック(カニ歩き)</div>
-    <div><kbd>R</kbd> リセット</div>
+    <div><kbd>E(長押し→離す)</kbd> サブウェポン(クイックボム)</div>
+    <div><kbd>R</kbd> スペシャル発動(ゲージ満タン時)</div>
+    <div><kbd>B</kbd> ブキ切替　<kbd>Shift(長押し)</kbd> 照準ロック(カニ歩き)</div>
     <button id="reset-btn">塗りをリセット</button>
+    <button id="die-btn" title="スペシャルゲージ減少のテスト用（デス相当）">デス(テスト)</button>
     <div id="weapon-switch"></div>
   </div>
 </div>
@@ -563,6 +587,66 @@ const WEAPONS = [
     //   インク効率(塗り): 290p(NC) 〜 130p(FC)
   },
 ];
+
+// ==========================================================================
+// サブウェポン「クイックボム」— 敵・床・壁・オブジェクトなど何かしらに
+// 当たると即座に爆発する投擲ボム。3つのブキすべてが同じクイックボムを
+// サブとして携行するものとして扱う(資料にブキごとの差異記載が無いため)。
+// 「前隙」はEキーを押してから実際に投げるまでの最小フレーム数(長押しすると
+// この時間は伸びる=溜め動作、離せば直ちに投げる)。押した時点のフォームで
+// 前隙(イカ/ヒト)が変わる — サブウェポン使用は必ずヒト状態を要求するため、
+// イカ状態から押した場合は浮上動作ぶん前隙が長くなる、という扱いにした。
+// ==========================================================================
+const QUICK_BOMB = {
+  name: 'クイックボム',
+  inkPerShot: 45,                     // インク消費量45%
+  inkRecoveryLockoutFrames: 60,       // インク回復不能時間 60F(1.00秒)
+  damageDirect: 25.0,                 // ダメージ（直撃）
+  damageNear: 35.0,                   // ダメージ（近距離）
+  damageNearRadiusLines: 0.56,        // ダメージ半径（近距離）
+  damageFar: 25.0,                    // ダメージ（遠距離）
+  damageFarRadiusLines: 0.80,         // ダメージ半径（遠距離）
+  splatRadiusLines: 0.80,             // 塗り半径
+  singleThrowPaintPoints: 15,         // 塗り面積 15p（1投の上限。creditCappedPaintPoints()で頭打ちする）
+  throwSpeedDU: 11.2,                 // 投擲初速
+  rangeLines: 3.0,                    // 射程
+  rangeLinesWithInertia: 5.0,         // 射程（慣性込み）— 投げる瞬間の移動速度に応じて伸びる分の上限
+  preShotFramesSquid: 10,             // 前隙（イカ）
+  preShotFramesHumanoid: 5,           // 前隙（ヒト）
+  reuseIntervalFrames: 30,            // 連続使用フレーム — 直近の投擲からこのフレーム数は経たないと次を投げられない
+  postShotFrames: 10,                 // 後隙 — 投擲後、イカ状態になれない時間
+};
+
+// ==========================================================================
+// スペシャルウェポン「ハリケーン」— スペシャルゲージ(塗りポイントの累積で
+// 充填、デスで現在値の50%減少)が必要塗りptに達するとRキーで発動できる。
+// 発動すると必ずヒト状態に固定され(イカ化不可)、マウス位置に照準を投げ、
+// 1.5秒後に着弾地点へ「トルネード」が着弾する。着弾すると周囲を塗り、
+// 持続時間中は継続ダメージを与える一方、旋風が消えるまでスペシャルゲージが
+// 一切溜まらなくなるペナルティタイムが発生する。
+// ==========================================================================
+const HURRICANE = {
+  name: 'ハリケーン',
+  warmupFrames: 90,          // 着弾予告の表示から着弾まで 1.5秒(90F)
+};
+const TORNADO_STATS = {
+  name: 'トルネード',
+  radiusLines: 1.0,               // 攻撃範囲 半径1ライン
+  damageDurationFrames: 90,       // ダメージ判定の持続時間 1.5s(90F)
+  burstVisualFrames: 60,          // 爆撃部(旋風の見た目)の持続 1s(60F)。この間はSPゲージが一切溜まらない
+  damageStart: 10.0,              // 着弾直後のダメージ/フレーム
+  damagePerFrameDecay: 5 / 60,    // 1Fごとの減衰量 (5/60 ≒ 0.08333)
+  damageMin: 2.5,                 // 最小ダメージ/フレーム(90F目時点、資料の2.58は概算値)
+  paintPoints: 60,                // トルネードの塗りpt
+  splatRadiusLines: 1.0,          // 着弾時に塗る範囲（攻撃範囲と同じ半径として扱う）
+};
+
+WEAPONS.forEach(w => { w.subWeapon = QUICK_BOMB; w.specialWeapon = HURRICANE; });
+// 必要塗りpt(スペシャルゲージの最大値)はブキごとに個別に決まっている。
+WEAPONS[0].specialRequiredPoints = 230; // スプラシューター
+WEAPONS[1].specialRequiredPoints = 215; // わかばシューター
+WEAPONS[2].specialRequiredPoints = 210; // リッター4K
+
 let currentWeaponIndex = 0; // switchable via switchWeapon() / weapon-switch buttons
 
 
@@ -605,6 +689,24 @@ const player = {
   chargeKeepActive: false,      // フルチャージ後に潜伏して発生した「本物の」チャージキープ中か
   chargeKeepFramesLeft: 0,      // チャージキープの残り持続フレーム数(潜伏中のみ減少。0で灯が消えチャージも失う)
   ckResurfaceDelayFramesLeft: 0, // チャージキープ解除(浮上)後、発射可能になるまでの残りフレーム数(前隙29F+チャージ1F)
+
+  // --- サブウェポン(クイックボム)状態 ---
+  subHolding: false,           // Eキーを押している間true(構え中)
+  subChargeFramesElapsed: 0,   // Eキーを押してから経過したフレーム数(前隙の最小値まで増える)
+  subFormAtPress: 'human',     // Eを押した瞬間のフォーム。前隙(イカ/ヒト)の判定に使う
+  subPendingThrow: false,      // Eを離したがまだ前隙の最小値に達していない場合にtrue(自動投擲待ち)
+  subCooldownFramesLeft: 0,    // 連続使用フレーム(30F) — 前回投擲からの残りクールダウン
+  subPostShotFramesLeft: 0,    // 後隙 — サブ投擲後、イカ状態になれない残りフレーム数
+  subLastUseAt: 0,             // 直近のサブ投擲時刻(performance.now()) — インク回復ロックアウト判定に使用
+
+  // --- スペシャルウェポン(ハリケーン/トルネード)状態 ---
+  spGauge: 0,                  // スペシャルゲージ(塗りptと同じ単位で蓄積)
+  spGaugeMax: 230,             // 現在のブキで発動に必要な塗りpt(applyWeaponSpeeds()で装備ブキから設定)
+  specialActive: false,        // ハリケーン発動中か(構え〜トルネード終了まで通してtrue)
+  specialPhase: 'none',        // 'none' | 'warning'（着弾予告中） | 'tornado'（トルネード展開中）
+  specialTargetX: 0, specialTargetY: 0, // トルネードの着弾予定地点
+  specialPhaseFramesLeft: 0,   // 現フェーズの残りフレーム数
+  spLockedFramesLeft: 0,       // この残りフレーム数の間、スペシャルゲージの増加を完全に停止する(旋風が消えるまでのペナルティタイム)
 };
 
 // 装備中のブキのweightClass（非射撃時ヒト速・イカ速×2種）とshootMoveSpeedDU
@@ -634,6 +736,10 @@ function applyWeaponSpeeds(){
   const capMult = weapon.mainInkCapacityMultiplier !== undefined ? weapon.mainInkCapacityMultiplier : 1;
   player.maxInk = 100 * capMult;
   player.ink = Math.min(player.ink, player.maxInk);
+  // スペシャルゲージの最大値(必要塗りpt)はブキ固有なので、ブキ切り替え時にも
+  // 再設定する。現在値はブキが変わっても直感的には引き継がれないほうが自然
+  // なので、switchWeapon()側であわせてリセットする。
+  player.spGaugeMax = weapon.specialRequiredPoints !== undefined ? weapon.specialRequiredPoints : player.spGaugeMax;
 }
 applyWeaponSpeeds();
 
@@ -654,6 +760,20 @@ function switchWeapon(index){
   player.chargeKeepActive = false;
   player.chargeKeepFramesLeft = 0;
   player.ckResurfaceDelayFramesLeft = 0;
+  // サブ/スペシャルの状態もブキ固有ではないが、切り替え中に投げかけの
+  // ボムやトルネードが残るのは不自然なのでリセットする。スペシャルゲージは
+  // 必要塗りptがブキごとに異なるため、切り替えのたびに0から溜め直す扱いにする。
+  player.subHolding = false;
+  player.subChargeFramesElapsed = 0;
+  player.subPendingThrow = false;
+  player.subCooldownFramesLeft = 0;
+  player.subPostShotFramesLeft = 0;
+  player.specialActive = false;
+  player.specialPhase = 'none';
+  player.specialPhaseFramesLeft = 0;
+  player.spLockedFramesLeft = 0;
+  player.spGauge = 0;
+  tornado.active = false;
   updateWeaponDisplay();
   updateWeaponSwitchButtons();
   const chargeWrapEl = document.getElementById('charge-wrap');
@@ -708,13 +828,42 @@ let aimLocked = false;
 window.addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
   if (k in keys) keys[k] = true;
-  if (k === 'r') resetPaint();
   if (e.key === 'Shift') aimLocked = true;
+  // サブウェポン(クイックボム)を構える。既に構え中/クールダウン中/後隙中/
+  // スペシャル発動中(構え固定)であれば無視する。押しっぱなしでもkeydownは
+  // 連続発火しうるので subHolding で多重開始を防ぐ。
+  if (k === 'e' && !player.subHolding && !player.subPendingThrow && player.subCooldownFramesLeft <= 0 &&
+      player.subPostShotFramesLeft <= 0 && !player.specialActive){
+    player.subHolding = true;
+    player.subChargeFramesElapsed = 0;
+    player.subFormAtPress = player.form;
+  }
+  // スペシャル発動: ゲージが満タン(spGauge >= spGaugeMax)かつ未発動のときだけ。
+  if (k === 'r' && !player.specialActive && player.spGauge >= player.spGaugeMax){
+    activateSpecial();
+  }
+  // ブキ切替(簡易版): 本来はウィンドウを開いて選ぶ操作だが、このプロトタイプ
+  // では次のブキへ単純にサイクルすることで代替する。
+  if (k === 'b') switchWeapon((currentWeaponIndex + 1) % WEAPONS.length);
 });
 window.addEventListener('keyup', e => {
   const k = e.key.toLowerCase();
   if (k in keys) keys[k] = false;
   if (e.key === 'Shift') aimLocked = false;
+  // Eを離した段階ではなく、離した瞬間に「投げる」意思決定を行う。前隙の
+  // 最小値にまだ達していなければ、直ちには投げず pendingSubThrow を立てて
+  // updatePlayer()側で前隙到達時に自動投擲する(チャージャーのpendingChargeFire
+  // と同じ考え方)。長押し中にイカ状態になった場合はmousedown/E押下側で既に
+  // subHolding自体を成立させない/解除しているので、ここに来る時点では
+  // 常にヒト状態のまま構えていたことになる。
+  if (k === 'e' && player.subHolding){
+    player.subHolding = false;
+    if (player.subChargeFramesElapsed >= currentSubPreShotFrames()){
+      throwQuickBomb();
+    } else {
+      player.subPendingThrow = true;
+    }
+  }
 });
 stage.addEventListener('mousemove', e => {
   const r = stage.getBoundingClientRect();
@@ -724,9 +873,14 @@ stage.addEventListener('mousemove', e => {
 stage.addEventListener('mousedown', e => {
   if (e.button === 0) mouse.down = true;
   if (e.button === 2){
-    // イカ化不能ロック中(発射後squidLockoutFrames)は右クリック長押しでも
-    // イカ状態に入れない — リッター4Kの発射後隙(16F)を再現するための制約。
-    if (player.squidLockoutFramesLeft <= 0){
+    // イカ化不能ロック中(発射後squidLockoutFrames、またはサブウェポンの
+    // 後隙subPostShotFramesLeft)は右クリック長押しでもイカ状態に入れない
+    // — リッター4Kの発射後隙(16F)・クイックボムの後隙(10F)を再現するための制約。
+    if (player.squidLockoutFramesLeft <= 0 && player.subPostShotFramesLeft <= 0 && !player.specialActive){
+      // Eキーを長押し中にイカ状態になろうとした場合、サブウェポンを
+      // 使用しようとする状態(構え・自動投擲待ちの両方)は解除される。
+      player.subHolding = false;
+      player.subPendingThrow = false;
       const weapon = WEAPONS[currentWeaponIndex];
       // チャージキープの定義: フルチャージが完了してからの潜伏でないと
       // 発生しない。フルチャージに満たない状態で潜伏した場合、チャージ
@@ -803,7 +957,27 @@ function resetPaint(){
   player.chargeKeepActive = false;
   player.chargeKeepFramesLeft = 0;
   player.ckResurfaceDelayFramesLeft = 0;
+  player.subHolding = false;
+  player.subChargeFramesElapsed = 0;
+  player.subPendingThrow = false;
+  player.subCooldownFramesLeft = 0;
+  player.subPostShotFramesLeft = 0;
+  player.spGauge = 0;
+  player.specialActive = false;
+  player.specialPhase = 'none';
+  player.specialPhaseFramesLeft = 0;
+  player.spLockedFramesLeft = 0;
+  quickBombs.length = 0;
+  tornado.active = false;
 }
+
+// デス(テスト用): このプロトタイプにはHP/被弾/デス判定が無いため、
+// 「スペシャル減少量ダウン」等のGP検証用に、デスに相当するスペシャル
+// ゲージ50%減少だけを単体でテストできるボタンを用意しておく。
+function simulateDeathSpGaugeDecay(){
+  player.spGauge *= 0.5; // 減少量は現在値の50%
+}
+document.getElementById('die-btn').addEventListener('click', simulateDeathSpGaugeDecay);
 
 // --------------------------------------------------------------------------
 // Splat rendering (organic version): a filled circle reads as a "sticker",
@@ -1346,6 +1520,236 @@ function updateProjectiles(dt){
 }
 
 // ==========================================================================
+// サブウェポン「クイックボム」の実装。
+// --------------------------------------------------------------------------
+// 前隙: Eを押した瞬間のフォームで人/イカのどちらの前隙(preShotFramesHumanoid
+// /preShotFramesSquid)を使うかが決まる(subFormAtPress、keydown 'e'参照)。
+// 長押しすればこの前隙より長く構え続けられる(投擲がその分遅れる=溜め)が、
+// 最短でも前隙ぶんのフレーム数は必ず構える。
+// ==========================================================================
+const quickBombs = [];
+
+function currentSubPreShotFrames(){
+  const sub = WEAPONS[currentWeaponIndex].subWeapon;
+  return player.subFormAtPress === 'squid' ? sub.preShotFramesSquid : sub.preShotFramesHumanoid;
+}
+
+function throwQuickBomb(){
+  const sub = WEAPONS[currentWeaponIndex].subWeapon;
+  player.subPendingThrow = false;
+  player.subChargeFramesElapsed = 0;
+  // インク不足・連続使用フレーム中はここまで到達しても投げない(構えが
+  // 解けるだけ)。呼び出し元(keyup 'e' / updatePlayer()の自動投擲待ち)は
+  // これらの条件を厳密にはチェックしていないため、最終防衛としてここで
+  // 確認する。
+  if (player.subCooldownFramesLeft > 0 || player.ink < sub.inkPerShot){
+    return;
+  }
+  player.ink -= sub.inkPerShot;
+  player.form = 'human'; // サブウェポン使用は必ずヒト状態を要求する
+
+  // 射程: 通常は3.0ライン。「慣性込み」で最大5.0ラインまで伸びる —
+  // 投げる瞬間のプレイヤーの移動入力(WASD)を「慣性」の代用とみなし、
+  // 移動中であれば慣性ボーナス込みの射程を、静止中は基本射程を使う。
+  const isMovingAtThrow = keys.w || keys.a || keys.s || keys.d;
+  const maxRangePx = lines(isMovingAtThrow ? sub.rangeLinesWithInertia : sub.rangeLines);
+  const cursorDist = Math.hypot(mouse.x - player.x, mouse.y - player.y);
+  const targetRange = Math.min(cursorDist, maxRangePx);
+  const angle = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+  const speedPxPerSec = duPerFrameToPxPerSec(sub.throwSpeedDU);
+
+  quickBombs.push({
+    x: player.x, y: player.y,
+    dirX: Math.cos(angle), dirY: Math.sin(angle),
+    speed: speedPxPerSec,
+    traveled: 0,
+    range: targetRange,
+    alive: true,
+  });
+
+  player.subCooldownFramesLeft = sub.reuseIntervalFrames;
+  player.subPostShotFramesLeft = sub.postShotFrames;
+  player.subLastUseAt = performance.now();
+}
+
+// クイックボムの爆発処理: 直撃(ダミーへのヒット)・近距離・遠距離の3段階
+// ダメージと、塗り半径ぶんのink splatを発生させる。直撃時は直撃ダメージ
+// (25.0)に加えて近距離爆風ダメージ(35.0)も入る、という資料の注記通り
+// 両方を加算する。直撃していなくても近距離半径・遠距離半径のいずれかに
+// ダミーが入っていればそれぞれのダメージを与える。
+function explodeQuickBomb(bomb, x, y){
+  const sub = WEAPONS[currentWeaponIndex].subWeapon;
+  const distToDummy = Math.hypot(x - dummy.x, y - dummy.y);
+  const directHit = distToDummy < dummy.radius;
+  const nearHit = distToDummy < dummy.radius + lines(sub.damageNearRadiusLines);
+  const farHit = distToDummy < dummy.radius + lines(sub.damageFarRadiusLines);
+
+  if (dummy.hp > 0 && (directHit || nearHit || farHit)){
+    let dmg = 0;
+    if (directHit) dmg += sub.damageDirect;
+    if (nearHit) dmg += sub.damageNear;
+    else if (farHit) dmg += sub.damageFar;
+    if (dmg > 0){
+      if (dummy.firstHitAt === null) dummy.firstHitAt = performance.now();
+      dummy.hp = Math.max(0, dummy.hp - dmg);
+      if (dummy.hp === 0){
+        dummy.lastKillTimeText = ((performance.now() - dummy.firstHitAt) / 1000).toFixed(3) + '秒';
+        setTimeout(respawnDummy, 500);
+      }
+    }
+  }
+
+  paintSplatClipped(x, y, lines(sub.splatRadiusLines));
+  creditCappedPaintPoints(sub.singleThrowPaintPoints);
+}
+
+// クイックボムは「敵や床、壁、オブジェクトなど何かしらに当たると即座に
+// 爆発する」仕様なので、着地(射程到達)・壁・ダミーのいずれでも即爆発として
+// 扱う(バウンドや猶予フレームは無し)。
+function updateQuickBombs(dt){
+  const sub = WEAPONS[currentWeaponIndex].subWeapon;
+  for (const b of quickBombs){
+    if (!b.alive) continue;
+    const stepX = b.dirX * b.speed * dt, stepY = b.dirY * b.speed * dt;
+    const nx = b.x + stepX, ny = b.y + stepY;
+    b.traveled += Math.hypot(stepX, stepY);
+
+    const projRadiusPx = 4; // 見た目上の当たり半径(資料に個別記載が無いため、着弾を自然に見せる小さめの固定値)
+    const hitDummy = dummy.hp > 0 && Math.hypot(nx - dummy.x, ny - dummy.y) < dummy.radius + projRadiusPx;
+    const hitWall = OBSTACLES.some(o => rectsOverlap(nx, ny, projRadiusPx, o));
+    const outOfRange = b.traveled >= b.range;
+    const outOfBounds = nx < 0 || nx > W || ny < 0 || ny > H;
+
+    if (hitDummy || hitWall || outOfRange || outOfBounds){
+      const landX = Math.min(Math.max(nx, 0), W);
+      const landY = Math.min(Math.max(ny, 0), H);
+      explodeQuickBomb(b, landX, landY);
+      b.alive = false;
+    } else {
+      b.x = nx; b.y = ny;
+    }
+  }
+  for (let i = quickBombs.length - 1; i >= 0; i--){
+    if (!quickBombs[i].alive) quickBombs.splice(i, 1);
+  }
+}
+
+// サブウェポンの構え〜投擲タイミングを毎フレーム進める。Eキーの押下自体は
+// keydown/keyupハンドラで処理しているので、ここでは「構え中のフレーム数を
+// 進める」「早離し(前隙未達での離し)の自動投擲」「クールダウン/後隙の消化」
+// のみを扱う。
+function updateSubWeapon(dt){
+  if (player.subCooldownFramesLeft > 0){
+    player.subCooldownFramesLeft = Math.max(0, player.subCooldownFramesLeft - dt * FPS);
+  }
+  if (player.subPostShotFramesLeft > 0){
+    player.subPostShotFramesLeft = Math.max(0, player.subPostShotFramesLeft - dt * FPS);
+  }
+  if (player.subHolding || player.subPendingThrow){
+    player.subChargeFramesElapsed += dt * FPS;
+    const minFrames = currentSubPreShotFrames();
+    if (player.subPendingThrow && player.subChargeFramesElapsed >= minFrames){
+      throwQuickBomb();
+    }
+  }
+  updateQuickBombs(dt);
+}
+
+// ==========================================================================
+// スペシャルウェポン「ハリケーン」/「トルネード」の実装。
+// --------------------------------------------------------------------------
+// ゲージは塗りポイントと全く同じ単位で溜まる(同じ換算係数を使う。
+// tickPaintPoints()/creditCappedPaintPoints()呼び出し箇所でplayer.spGaugeへ
+// も同じ増分を加える、addPaintPointsToSpGauge()参照)。トルネードの旋風が
+// 消えるまでの間(spLockedFramesLeft>0)はゲージ増加を止める。
+// ==========================================================================
+const tornado = { active: false, x: 0, y: 0, framesElapsed: 0 };
+
+// 塗りによるスコア増分delta(pt)をスペシャルゲージにも加算する共通ヘルパー。
+// spLockedFramesLeft中は加算しない(ペナルティタイム)。ゲージはspGaugeMaxで
+// 頭打ちする。
+function addPaintPointsToSpGauge(delta){
+  if (delta <= 0) return;
+  if (player.spLockedFramesLeft > 0) return;
+  player.spGauge = Math.min(player.spGaugeMax, player.spGauge + delta);
+}
+
+function activateSpecial(){
+  const weapon = WEAPONS[currentWeaponIndex];
+  player.specialActive = true;
+  player.specialPhase = 'warning';
+  player.specialPhaseFramesLeft = weapon.specialWeapon.warmupFrames;
+  player.specialTargetX = Math.min(Math.max(mouse.x, 0), W);
+  player.specialTargetY = Math.min(Math.max(mouse.y, 0), H);
+  // 発動時の共通仕様: インクタンクが満タンになる。また、発動中は必ず
+  // ヒト状態に固定されイカ化できない(サブウェポン構え中の解除と同様、
+  // 発動時点で構え中のクイックボットも打ち切る)。
+  player.ink = player.maxInk;
+  player.form = 'human';
+  player.subHolding = false;
+  player.subPendingThrow = false;
+  player.chargeKeepActive = false;
+  // 発動するとゲージそのものは(実機同様)使い切られる。
+  player.spGauge = 0;
+}
+
+function landTornado(){
+  tornado.active = true;
+  tornado.x = player.specialTargetX;
+  tornado.y = player.specialTargetY;
+  tornado.framesElapsed = 0;
+  // 着弾時に周囲を一括で塗る(塗りptはトルネードの規定値60ptを上限とする)。
+  paintSplatClipped(tornado.x, tornado.y, lines(TORNADO_STATS.splatRadiusLines));
+  creditCappedPaintPoints(TORNADO_STATS.paintPoints);
+  // 着弾〜旋風が消えるまではスペシャルゲージが一切溜まらないペナルティ
+  // タイム。burstVisualFrames(1s)を基準に使う。
+  player.spLockedFramesLeft = Math.max(player.spLockedFramesLeft, TORNADO_STATS.burstVisualFrames);
+}
+
+// スペシャル本体の毎フレーム更新。フェーズ'warning'(着弾予告)→'tornado'
+// (ダメージ判定90F)と進み、ダメージ判定が終わったら発動状態を解除する
+// (=構え固定・イカ化不能も解ける)。トルネードのダメージは着弾直後10.0/f
+// から1fごとに5/60ずつ減衰し、最小2.5/fに漸近する(90F持続)。
+function updateSpecial(dt){
+  const framesDelta = dt * FPS;
+
+  if (player.spLockedFramesLeft > 0){
+    player.spLockedFramesLeft = Math.max(0, player.spLockedFramesLeft - framesDelta);
+  }
+
+  if (player.specialPhase === 'warning'){
+    player.specialPhaseFramesLeft -= framesDelta;
+    if (player.specialPhaseFramesLeft <= 0){
+      landTornado();
+      player.specialPhase = 'tornado';
+      player.specialPhaseFramesLeft = TORNADO_STATS.damageDurationFrames;
+    }
+  } else if (player.specialPhase === 'tornado'){
+    player.specialPhaseFramesLeft -= framesDelta;
+    if (player.specialPhaseFramesLeft <= 0){
+      tornado.active = false;
+      player.specialPhase = 'none';
+      player.specialActive = false;
+    }
+  }
+
+  if (tornado.active){
+    tornado.framesElapsed += framesDelta;
+    const distToDummy = Math.hypot(tornado.x - dummy.x, tornado.y - dummy.y);
+    if (dummy.hp > 0 && distToDummy < dummy.radius + lines(TORNADO_STATS.radiusLines)){
+      const raw = TORNADO_STATS.damageStart - TORNADO_STATS.damagePerFrameDecay * tornado.framesElapsed;
+      const dmgPerFrame = Math.max(TORNADO_STATS.damageMin, raw);
+      if (dummy.firstHitAt === null) dummy.firstHitAt = performance.now();
+      dummy.hp = Math.max(0, dummy.hp - dmgPerFrame * framesDelta);
+      if (dummy.hp === 0){
+        dummy.lastKillTimeText = ((performance.now() - dummy.firstHitAt) / 1000).toFixed(3) + '秒';
+        setTimeout(respawnDummy, 500);
+      }
+    }
+  }
+}
+
+// ==========================================================================
 // チャージャー種 (リッター4K) — シューター種とは別の武器系統。
 // 左クリック長押しでチャージ→離すと現在のチャージ量に応じたステータスで
 // 1発だけ即着弾(ヒットスキャン)の弾を撃つ。射程・ダメージ・初速・インク
@@ -1546,24 +1950,6 @@ function fireChargerShot(){
     paintTrailDot(dx0, dy0, radiusAlongPx * mult, radiusAcrossPx * mult, angle);
   }
 
-  // 塗りポイントの定義を2つとも守る:
-  //   (1) 1回塗った場所を重ねて撃っても加算されない(既存の面積差分ベースの
-  //       仕組みがこれを担保している — prevSampleMaskで「既に塗られていた
-  //       ピクセル」は新規扱いにならない)
-  //   (2) 塗りポイントの増分がマイナスになることは絶対にない
-  // このブキは単発塗りポイントがwikiでノーチャージ6.6p〜フルチャージ32.0p
-  // と明記されており、この値は「1発で塗れる上限」を表す公称値である。
-  // 面積差分ベースの実測値(tickPaintPoints)は、軌跡塗り・足元塗り・
-  // 着弾先端塗りが互いに重なる/自分の既存インクと重なる分だけ差し引かれる
-  // 一方で、単純な半径合計から見積もった「重ならなければこれだけ塗れる」
-  // 面積は公称値より大きく出ることがあり、そのまま「公称値をまるごと足す」
-  // 実装だと実測値が公称値を上回った回で差し引き分がマイナスになってしまう
-  // バグがあった（また、それだと(1)の「既に塗った場所には加算しない」定義
-  // にも反していた——実測値がほぼ0の場所を撃っても公称値がまるごと乗って
-  // しまうため）。共通ヘルパーcreditCappedPaintPoints()（実測値と公称値の
-  // 小さい方だけを加算する）に一本化してある。シューター種(スプラシュー
-  // ター・わかばシューター)の着弾時にも同じヘルパーを使っている
-  // (updateProjectiles()参照)。
   const nominalShotPoints = chargeLerp(weapon.singleShotPaintPointsNoCharge, weapon.singleShotPaintPointsFull, frac); // 1発の上限（フルチャージなら32.0p）
   creditCappedPaintPoints(nominalShotPoints);
 
@@ -1658,7 +2044,7 @@ function updatePlayer(dt){
     // (不発にはならない)」という仕様の再現。8Fに到達した瞬間、下の
     // if内で自動的にfireChargerShot()を呼んで発射する。
     const wantsToCharge = mouse.down || player.pendingChargeFire;
-    if (player.form === 'human' && wantsToCharge && player.chargeCooldownFramesLeft <= 0){
+    if (player.form === 'human' && wantsToCharge && player.chargeCooldownFramesLeft <= 0 && !player.specialActive){
       player.charging = true;
       const curFrac = getChargeFraction();
       const curInkCost = chargeLerp(weaponForMove.inkPerShotNoCharge, weaponForMove.inkPerShotFull, curFrac);
@@ -1728,8 +2114,14 @@ function updatePlayer(dt){
   const now0 = performance.now();
   const weapon0 = WEAPONS[currentWeaponIndex];
   const framesSinceLastShot = (now0 - lastShotAt) / 1000 * FPS;
-  const inLockout = weapon0.inkRecoveryLockoutFrames !== undefined &&
+  const inMainLockout = weapon0.inkRecoveryLockoutFrames !== undefined &&
                      lastShotAt > 0 && framesSinceLastShot < weapon0.inkRecoveryLockoutFrames;
+  // サブウェポン(クイックボム)固有のインク回復不能時間(60F)も同様に判定し、
+  // どちらかがロック中であれば回復を止める。
+  const framesSinceLastSub = (now0 - player.subLastUseAt) / 1000 * FPS;
+  const inSubLockout = weapon0.subWeapon !== undefined &&
+                     player.subLastUseAt > 0 && framesSinceLastSub < weapon0.subWeapon.inkRecoveryLockoutFrames;
+  const inLockout = inMainLockout || inSubLockout;
   // チャージャー種はチャージを溜めている間、消費予測ぶんのインクを
   // "確保"している状態として扱い、自然回復も止める
   // （＝チャージ中は白い帯(予測)が伸びるだけで、ゲージの緑残量自体は減らないが、
@@ -1754,7 +2146,7 @@ function updatePlayer(dt){
   const weapon = WEAPONS[currentWeaponIndex];
   // イカ状態では左クリック(発射)を無効化する。チャージャー種はここでは
   // 発射しない(mouseupハンドラでfireChargerShot()を呼ぶ)。
-  if (weapon.type !== 'charger' &&
+  if (weapon.type !== 'charger' && !player.specialActive &&
       player.form === 'human' && mouse.down && now - lastShotAt >= weapon.fireIntervalSec * 1000){
     lastShotAt = now;
     fireShot();
@@ -1815,7 +2207,12 @@ function tickPaintPoints(){
     if (isPainted && !prevSampleMask[px]) newlyPainted++;
     prevSampleMask[px] = isPainted;
   }
-  totalPaintPoints += newlyPainted * LINE_AREA_PER_SAMPLE_PIXEL * POINTS_PER_LINE_SQUARED;
+  const gained = newlyPainted * LINE_AREA_PER_SAMPLE_PIXEL * POINTS_PER_LINE_SQUARED;
+  totalPaintPoints += gained;
+  // スペシャルゲージの基本の溜め方は「地面や相手のナワバリを塗ること」
+  // なので、塗りポイントと全く同じ実測面積ベースの増分をゲージにも加える
+  // (addPaintPointsToSpGauge内でspLockedFramesLeft中の抑制・上限クランプを行う)。
+  addPaintPointsToSpGauge(gained);
   return totalPaintPoints;
 }
 
@@ -1829,402 +2226,4 @@ function tickPaintPoints(){
 //   - 実測値・公称値のどちらも0以上なので、結果が負になることはない
 // tickPaintPoints()自体は毎回prevSampleMaskを更新するので、ここで消費した
 // 新規面積が後続の定期サンプリング(setInterval)で二重加算されることもない。
-function creditCappedPaintPoints(nominalPoints){
-  if (nominalPoints === undefined) return;
-  const before = totalPaintPoints;
-  tickPaintPoints();
-  const areaBasedDelta = totalPaintPoints - before; // 常に0以上
-  const credited = Math.min(areaBasedDelta, nominalPoints);
-  totalPaintPoints = before + credited;
-}
-
-const coverageValueEl = document.getElementById('coverage-value');
-const inkGaugeEl = document.getElementById('ink-gauge-inner');
-const inkPredictBandEl = document.getElementById('ink-predict-band');
-const swimBadgeEl = document.getElementById('swim-badge');
-const weaponNameEl = document.getElementById('weapon-name');
-const weaponStatsEl = document.getElementById('weapon-stats');
-const dummyStatusEl = document.getElementById('dummy-status');
-const hitProbabilityEl = document.getElementById('hit-probability');
-const chargeGaugeInnerEl = document.getElementById('charge-gauge-inner');
-
-function updateWeaponDisplay(){
-  const w = WEAPONS[currentWeaponIndex];
-  weaponNameEl.textContent = w.name;
-  if (w.type === 'charger'){
-    weaponStatsEl.textContent =
-      `射程 ライン${w.rangeLinesNoCharge}〜${w.rangeLinesFull} ／ ` +
-      `チャージ${w.chargeFrames}F(${(w.chargeFrames / FPS).toFixed(3)}s)／NC${w.minChargeFramesToFire}F ／ ` +
-      `ダメージ ${w.damageNoCharge}〜${w.damageHalfChargeMax}／フル${w.damageFull} ／ ` +
-      `インク消費${w.inkPerShotNoCharge}〜${w.inkPerShotFull}% ／ ` +
-      `発射後隙 チャ${w.chargeRestartFrames}F・イカ${w.squidLockoutFrames}F・インク${w.inkRecoveryLockoutFrames}F`;
-  } else {
-    const capNote = w.mainInkCapacityMultiplier !== undefined && w.mainInkCapacityMultiplier !== 1
-      ? ` ／ タンク容量×${w.mainInkCapacityMultiplier}`
-      : '';
-    weaponStatsEl.textContent =
-      `有効射程 ライン${w.rangeLines} ／ 確定数維持射程 ライン${w.confirmedKillRangeLines} ／ ` +
-      `連射${(w.fireIntervalSec * FPS).toFixed(0)}F(${w.fireIntervalSec.toFixed(3)}s) ／ ` +
-      `ダメージ ${w.damageFalloff.startDamage}→${w.damageFalloff.endDamage} ／ ` +
-      `インク消費${(w.inkPerShot).toFixed(2)}%${capNote}`;
-  }
-}
-
-// 武器切り替えボタンをWEAPONSから動的に生成し、現在選択中のブキに
-// activeクラスを付与する。武器数が増えてもここは触らずに済む。
-const weaponSwitchEl = document.getElementById('weapon-switch');
-function updateWeaponSwitchButtons(){
-  weaponSwitchEl.querySelectorAll('button').forEach((btn, i) => {
-    btn.classList.toggle('active', i === currentWeaponIndex);
-  });
-}
-WEAPONS.forEach((w, i) => {
-  const btn = document.createElement('button');
-  btn.textContent = w.name;
-  btn.addEventListener('click', () => switchWeapon(i));
-  weaponSwitchEl.appendChild(btn);
-});
-
-updateWeaponDisplay();
-updateWeaponSwitchButtons();
-resetBiasState();
-
-setInterval(() => {
-  coverageValueEl.textContent = Math.round(tickPaintPoints()) + 'pt';
-}, 300);
-
-// --------------------------------------------------------------------------
-// Render: floor -> accumulated ink -> walls -> aim line -> player.
-// Nothing here mutates paint state; this function only reads it.
-// --------------------------------------------------------------------------
-function render(){
-  ctx.fillStyle = '#2a2d38';
-  ctx.fillRect(0, 0, W, H);
-
-  ctx.drawImage(paintLayer, 0, 0);
-
-  ctx.fillStyle = '#0b0c10';
-  ctx.strokeStyle = '#33384a';
-  for (const o of OBSTACLES){
-    ctx.fillRect(o.x, o.y, o.w, o.h);
-    ctx.strokeRect(o.x + 0.5, o.y + 0.5, o.w - 1, o.h - 1);
-  }
-
-  // ライン markers: full-field practice-range grid, spaced 1 line (5m) apart
-  // in both directions. 縦ライン (vertical, running top-to-bottom) are drawn
-  // in green; 横ライン (horizontal, running left-to-right) are drawn in gray.
-  ctx.lineWidth = 1;
-  ctx.font = '10px sans-serif';
-
-  ctx.strokeStyle = 'rgba(70,220,140,0.35)';
-  ctx.fillStyle = 'rgba(70,220,140,0.55)';
-  for (let n = 1; n * PIXELS_PER_LINE < W; n++){
-    const lx = n * PIXELS_PER_LINE;
-    ctx.beginPath();
-    ctx.moveTo(lx, 0);
-    ctx.lineTo(lx, H);
-    ctx.stroke();
-    ctx.fillText(String(n), lx + 3, 14);
-  }
-
-  ctx.strokeStyle = 'rgba(125,131,148,0.45)';
-  ctx.fillStyle = 'rgba(125,131,148,0.65)';
-  for (let n = 1; n * PIXELS_PER_LINE < H; n++){
-    const ly = n * PIXELS_PER_LINE;
-    ctx.beginPath();
-    ctx.moveTo(0, ly);
-    ctx.lineTo(W, ly);
-    ctx.stroke();
-    ctx.fillText(String(n), 3, ly - 3);
-  }
-
-  // Practice dummy: a static target so weapon differences (hits-to-kill,
-  // kill time) are felt directly instead of only read off the HUD.
-  ctx.fillStyle = '#4b5063';
-  ctx.beginPath();
-  ctx.arc(dummy.x, dummy.y, dummy.radius, 0, Math.PI * 2);
-  ctx.fill();
-  const hpFrac = dummy.hp / dummy.maxHp;
-  ctx.fillStyle = '#0b0c10';
-  ctx.fillRect(dummy.x - 20, dummy.y - dummy.radius - 12, 40, 5);
-  ctx.fillStyle = hpFrac > 0.3 ? '#33e6c0' : '#ff5a1f';
-  ctx.fillRect(dummy.x - 20, dummy.y - dummy.radius - 12, 40 * hpFrac, 5);
-
-  const weaponNow = WEAPONS[currentWeaponIndex];
-  const biasText = weaponNow.firstShotBiasDeg !== undefined
-    ? `　照準ブレ: ${bias.currentDeg.toFixed(3)}°(最大${weaponNow.maxBiasDeg}°)`
-    : '';
-  dummyStatusEl.textContent = `ダミーHP ${dummy.hp}/${dummy.maxHp}　直近キルタイム: ${dummy.lastKillTimeText}${biasText}`;
-
-  // 命中率(理論値): 照準が的にピッタリ合っている前提で、現在の距離とブレ
-  // 補正値から算出。ブレ機構を持たないブキでは null になり非表示にする。
-  const distToDummyPx = Math.hypot(dummy.x - player.x, dummy.y - player.y);
-  const r1Px = dummy.radius;
-  const r2Px = weaponNow.projectileSizeEnemyLines !== undefined ? lines(weaponNow.projectileSizeEnemyLines) / 2 : 0;
-  const hitProb = computeHitProbability(weaponNow, distToDummyPx, r1Px, r2Px);
-  if (hitProb === null){
-    hitProbabilityEl.textContent = '';
-  } else {
-    hitProbabilityEl.textContent = `命中率(理論値・照準完全一致時): ${hitProb.toFixed(1)}%　距離: ライン${toLines(distToDummyPx).toFixed(2)}`;
-  }
-
-  // Projectiles in flight, drawn as small bright dots that shrink as they
-  // decelerate — a visual stand-in for "falling" in this top-down 2D view.
-  ctx.fillStyle = '#ffd8c2';
-  for (const p of projectiles){
-    const speedRatio = Math.min(1, Math.max(0, p.xzSpeed / p.initialSpeed));
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 1.5 + 2 * speedRatio, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // チャージャーの光跡フラッシュ: 発射直後だけ明るく、150msでフェードアウト。
-  const FLASH_LIFETIME_MS = 150;
-  for (let i = chargerFlashes.length - 1; i >= 0; i--){
-    const f = chargerFlashes[i];
-    const age = performance.now() - f.bornAt;
-    if (age >= FLASH_LIFETIME_MS){ chargerFlashes.splice(i, 1); continue; }
-    const alpha = 1 - age / FLASH_LIFETIME_MS;
-    ctx.strokeStyle = `rgba(255, 216, 194, ${alpha})`;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(f.x1, f.y1);
-    ctx.lineTo(f.x2, f.y2);
-    ctx.stroke();
-  }
-
-  // チャージャー種の定義: チャージ中は予測線（見える射線・チャージレーザー）
-  // を表示する。実機では味方・敵の両方から見える情報として扱われる
-  // （このプロトタイプは自チーム視点のみのため常時描画で代用）。線の色は
-  // 自陣のインク色(TEAM_COLOR)を使う——陣営ごとにレーザー色が変わる、
-  // という実機の見た目(オレンジ/パープル等)を再現するため。長さは現在の
-  // チャージ量に応じた射程(ライン)まで伸びるが、実際のインクショットとは
-  // 異なりこのレーザー表示自体は地形にもヒト(ダミー)にも貫通しないため、
-  // 最初に何かへぶつかった地点でそこから先は描画しない
-  // (computeLaserStopDistance()参照)。
-  const chargerAiming = weaponNow.type === 'charger' && player.form === 'human' && player.charging;
-  if (chargerAiming){
-    const laserFrac = getChargeFraction();
-    const laserMaxRangePx = lines(chargeLerp(weaponNow.rangeLinesNoCharge, weaponNow.rangeLinesFull, laserFrac));
-    const laserDirX = Math.cos(player.aimAngle), laserDirY = Math.sin(player.aimAngle);
-    const laserProjRadiusTerrainPx = weaponNow.projectileSizeTerrainLines !== undefined ? lines(weaponNow.projectileSizeTerrainLines) / 2 : 3;
-    const laserProjRadiusEnemyPx = weaponNow.projectileSizeEnemyLines !== undefined ? lines(weaponNow.projectileSizeEnemyLines) / 2 : 0;
-    const laserVisibleDist = computeLaserStopDistance(
-      laserMaxRangePx, laserDirX, laserDirY, laserProjRadiusTerrainPx, laserProjRadiusEnemyPx
-    );
-    const laserEndX = player.x + laserDirX * laserVisibleDist;
-    const laserEndY = player.y + laserDirY * laserVisibleDist;
-    ctx.save();
-    // 1) 外側の柔らかいハロー(太め・低不透明度・強いぼかし)
-    ctx.strokeStyle = TEAM_COLOR;
-    ctx.shadowColor = TEAM_COLOR;
-    ctx.shadowBlur = 18;
-    ctx.globalAlpha = 0.4;
-    ctx.lineWidth = 3.5;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(player.x, player.y);
-    ctx.lineTo(laserEndX, laserEndY);
-    ctx.stroke();
-    // 2) 中間の彩度の高い本体色レイヤー
-    ctx.shadowBlur = 10;
-    ctx.globalAlpha = 0.85;
-    ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    ctx.moveTo(player.x, player.y);
-    ctx.lineTo(laserEndX, laserEndY);
-    ctx.stroke();
-    // 3) 中心の白く輝くコア(レーザーらしい高輝度の芯)
-    ctx.strokeStyle = '#ffffff';
-    ctx.shadowColor = '#ffffff';
-    ctx.shadowBlur = 6;
-    ctx.globalAlpha = 1;
-    ctx.lineWidth = 0.7;
-    ctx.beginPath();
-    ctx.moveTo(player.x, player.y);
-    ctx.lineTo(laserEndX, laserEndY);
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-    ctx.restore();
-  } else {
-    // Aim guide, subtle.
-    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(player.x, player.y);
-    ctx.lineTo(player.x + Math.cos(player.aimAngle) * 40,
-               player.y + Math.sin(player.aimAngle) * 40);
-    ctx.stroke();
-  }
-
-  // チャージキープ中の潜伏を発光させる（画像参照仕様）:
-  // 実機の見た目は「イカ本体そのものが強く発光する」のが主役で、地面側は
-  // その光がインク面にぼんやり映り込む程度——なので以前のような「地面の
-  // 帯全体をブルームさせる」演出は撤廃し、代わりに(1)インク面への光の映り
-  // 込み(プレイヤー位置中心のやわらかい反射グロー。イカが完全に潜って
-  // いて画面上イカ本体が見えない場合でも、光そのものはインク上に映る、
-  // という指定のため isSwimming の有無に関わらず常に描く)と、(2)イカ本体
-  // の発光(後述のプレイヤー描画ブロックで、白〜ピンクの明るいコア＋外周の
-  // チーム色ハローとして描画)の2段構成にする。持続時間(chargeKeepFramesLeft)
-  // が尽きるにつれてフェードし、0で完全に消える。pulseはsin波の脈動係数。
-  const chargeKeepGlowing = weaponNow.type === 'charger' && player.form === 'squid' && player.chargeKeepActive;
-  const glowFade = (chargeKeepGlowing && weaponNow.ckStats)
-    ? Math.max(0, player.chargeKeepFramesLeft / weaponNow.ckStats.keepDurationFrames)
-    : 0;
-  if (chargeKeepGlowing && glowFade > 0){
-    const [tr, tg, tb] = TEAM_COLOR_RGB;
-    const pulse = 0.8 + 0.2 * Math.sin(performance.now() / 130);
-    const intensity = glowFade * pulse;
-
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-
-    // インク面への光の映り込み: プレイヤー位置を中心にした、地面に落ちる
-    // 柔らかい反射グロー。中心はほんのりピンクがかった白、外側へチーム色
-    // にじんで消える——「イカ自体が光り、その光が塗られたインクの上に
-    // 映っている」印象を狙う。潜伏中(isSwimming)かどうかに関わらず描画する。
-    const groundRadius = player.radius * 5.5;
-    const groundGrad = ctx.createRadialGradient(player.x, player.y, 0, player.x, player.y, groundRadius);
-    groundGrad.addColorStop(0, `rgba(255,205,240,${0.5 * intensity})`);
-    groundGrad.addColorStop(0.4, `rgba(${tr},${tg},${tb},${0.32 * intensity})`);
-    groundGrad.addColorStop(1, `rgba(${tr},${tg},${tb},0)`);
-    ctx.fillStyle = groundGrad;
-    ctx.beginPath();
-    ctx.arc(player.x, player.y, groundRadius, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.restore();
-  }
-
-  // Player: a squid-like teardrop that stretches slightly while swimming,
-  // just enough to make the state change legible at a glance.
-  ctx.save();
-  ctx.translate(player.x, player.y);
-  ctx.rotate(player.aimAngle);
-  const stretch = player.form === 'squid' ? 1.35 : 1;
-
-  // イカ本体の発光(画像参照): ハロー・コアはイカ本体のstretch変形の影響を
-  // 受けない真円として描くため、本体を塗るscale(stretch, 1/√stretch)の
-  // 外側(translate+rotateのみが効いている座標系)で描画する。
-  if (chargeKeepGlowing && glowFade > 0){
-    const [tr, tg, tb] = TEAM_COLOR_RGB;
-    const pulseBody = 0.8 + 0.2 * Math.sin(performance.now() / 130);
-    const bodyIntensity = glowFade * pulseBody;
-
-    // 外側のチーム色ハロー(発光ブルーム) — 真円
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.shadowColor = `rgb(${tr},${tg},${tb})`;
-    ctx.shadowBlur = 26 * bodyIntensity;
-    ctx.fillStyle = `rgba(${tr},${tg},${tb},${0.55 * bodyIntensity})`;
-    ctx.beginPath();
-    ctx.arc(0, 0, player.radius * 1.2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-  }
-
-  ctx.save();
-  ctx.scale(stretch, 1 / Math.sqrt(stretch));
-  ctx.fillStyle = TEAM_COLOR;
-  ctx.beginPath();
-  ctx.arc(0, 0, player.radius, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-
-  if (chargeKeepGlowing && glowFade > 0){
-    // 中心の明るいピンク〜白のコア発光(画像参照) — 真円
-    const pulseBody = 0.8 + 0.2 * Math.sin(performance.now() / 130);
-    const coreIntensity = glowFade * pulseBody;
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    const coreGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, player.radius * 0.9);
-    coreGrad.addColorStop(0, `rgba(255,255,255,${0.95 * coreIntensity})`);
-    coreGrad.addColorStop(0.45, `rgba(255,150,225,${0.8 * coreIntensity})`);
-    coreGrad.addColorStop(1, `rgba(255,150,225,0)`);
-    ctx.fillStyle = coreGrad;
-    ctx.beginPath();
-    ctx.arc(0, 0, player.radius * 0.9, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-  } else {
-    ctx.save();
-    ctx.scale(stretch, 1 / Math.sqrt(stretch));
-    ctx.fillStyle = '#fff4';
-    ctx.beginPath();
-    ctx.arc(player.radius * 0.4, 0, player.radius * 0.35, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-  }
-  ctx.restore();
-
-
-  inkGaugeEl.style.width = (player.ink / player.maxInk * 100) + '%';
-
-  // チャージ中の消費インク予測（白い帯）:
-  // 現在のチャージ量(chargeFraction)から算出した「今離したら消費される
-  // であろうインク量」を、インクゲージの現在値の右端(高インク側)から
-  // 差し引いた区間に白帯として重ねて表示する。チャージ時間が伸びるほど
-  // 予測消費量(predictedCost)も増えるので帯が左へ広がっていき、実際に
-  // 発射するとインクが本当に減って帯は消える(player.charging=falseになる
-  // ため)——見た目上は白帯が消えてオレンジのゲージがその位置まで縮む形
-  // になり、「白い帯が右から順番に消えていく」という見た目に近づく。
-  // ヒト状態でチャージ中のときだけ表示し、イカ状態になった瞬間
-  // （チャージ不可）は非表示にする。
-  if (weaponNow.type === 'charger' && player.form === 'human' && player.charging){
-    const frac = getChargeFraction();
-    const predictedCost = chargeLerp(weaponNow.inkPerShotNoCharge, weaponNow.inkPerShotFull, frac);
-    const beforeFrac = Math.min(1, player.ink / player.maxInk);
-    const afterFrac = Math.max(0, (player.ink - predictedCost) / player.maxInk);
-    inkPredictBandEl.style.left = (afterFrac * 100) + '%';
-    inkPredictBandEl.style.width = Math.max(0, (beforeFrac - afterFrac) * 100) + '%';
-    inkPredictBandEl.style.opacity = '1';
-  } else {
-    inkPredictBandEl.style.opacity = '0';
-    inkPredictBandEl.style.width = '0%';
-  }
-
-  if (weaponNow.type === 'charger'){
-    chargeGaugeInnerEl.style.width = (getChargeFraction() * 100) + '%';
-  }
-
-  // フォーム表示: ヒト状態は常に「自然回復のみ」。イカ状態は自陣インク上か
-  // どうかで急速回復が効いているかが変わるので、それも合わせて表示する。
-  // ただしチャージキープ中(イカ状態でチャージ保持中)は自陣インク上でも
-  // 回復自体が無効化されるので、その旨を優先して表示する。
-  const chargeKeepingDisplay = weaponNow.type === 'charger' && player.form === 'squid' && player.chargeKeepActive;
-  const rapidRegenActive = player.form === 'squid' && player.isSwimming && !chargeKeepingDisplay;
-  if (chargeKeepingDisplay){
-    swimBadgeEl.textContent = '◆ イカ状態(チャージキープ中)：インク回復は無効';
-  } else if (player.form === 'squid'){
-    swimBadgeEl.textContent = rapidRegenActive
-      ? '◆ イカ状態(自陣インク上)：移動速度UP／急速回復中'
-      : '◆ イカ状態(インク外)：移動速度UP／回復は自然回復のみ';
-  } else if (weaponNow.type === 'charger' && player.charging){
-    swimBadgeEl.textContent = player.pendingChargeFire
-      ? '◆ ヒト状態：チャージ中(自然回復は停止／早離し・8F到達で自動発射)'
-      : '◆ ヒト状態：チャージ中(自然回復は停止)';
-  } else {
-    swimBadgeEl.textContent = '◆ ヒト状態：自然回復のみ';
-  }
-  swimBadgeEl.classList.toggle('active', rapidRegenActive);
-}
-
-// --------------------------------------------------------------------------
-// Main loop — dt-based so behavior is consistent regardless of frame rate.
-// --------------------------------------------------------------------------
-let lastTime = performance.now();
-function loop(now){
-  const dt = Math.min((now - lastTime) / 1000, 0.05); // clamp to avoid huge steps on tab-switch
-  lastTime = now;
-
-  updatePlayer(dt);
-  updateProjectiles(dt);
-  render();
-
-  requestAnimationFrame(loop);
-}
-requestAnimationFrame(loop);
-</script>
-</body>
-</html>
+function creditCappedPaintPoints(nomina
