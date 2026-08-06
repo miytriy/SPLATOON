@@ -774,8 +774,7 @@ function switchWeapon(index){
   player.spLockedFramesLeft = 0;
   player.spGauge = 0;
   tornado.active = false;
-  tornado.shards = [];
-  tornado.shardsSpawned = false;
+  tornado.debris = [];
   damagePopups.length = 0;
   updateWeaponDisplay();
   updateWeaponSwitchButtons();
@@ -972,8 +971,7 @@ function resetPaint(){
   player.spLockedFramesLeft = 0;
   quickBombs.length = 0;
   tornado.active = false;
-  tornado.shards = [];
-  tornado.shardsSpawned = false;
+  tornado.debris = [];
   damagePopups.length = 0;
 }
 
@@ -1671,22 +1669,15 @@ function updateSubWeapon(dt){
 // も同じ増分を加える、addPaintPointsToSpGauge()参照)。トルネードの旋風が
 // 消えるまでの間(spLockedFramesLeft>0)はゲージ増加を止める。
 // ==========================================================================
-// 柱の演出タイムライン（参照動画に合わせた見た目専用のフレーム区切り。
-// ダメージ判定自体はTORNADO_STATS.damageDurationFrames/damageStart等の
-// 既存ロジックのままで、ここは表示だけを制御する）:
-//   0〜TORNADO_RISE_FRAMES: 柱が地面から一気に伸び上がる(立ち上がり)
-//   〜TORNADO_STATS.burstVisualFrames: 伸びきった柱がそのまま持続(縦筋が
-//     ゆらめく)
-//   〜+TORNADO_BURST_SPREAD_FRAMES: 柱が破裂し、破片が周囲へ飛び散って
-//     着地点にインクを飛び散らせる(飛び散った破片は実際にcoverage/paint
-//     両レイヤーへ焼き付くので、見た目だけでなく塗り面積としても加算される)
-const TORNADO_RISE_FRAMES = 10;
-const TORNADO_BURST_SPREAD_FRAMES = 18;
-
+// トルネードの見た目: 着弾と同時に画像参考(実機の「トルネード」)のような
+// 大きく丸い一枚のインク跡をその場に残し(landTornado()内、
+// paintTornadoLandingPatch()参照)、発動中(ダメージ判定が続く間)は渦を
+// 巻く竜巻(旋風)のエフェクトを表示する。debrisは竜巻に吸い込まれて渦を
+// 巻きながら回る粒 — 見た目だけの演出で、実際の塗り判定には一切関与しない
+// (地面のインク跡は着弾時に一度だけ確定して焼き付く)。
 const tornado = {
   active: false, x: 0, y: 0, framesElapsed: 0,
-  shards: [],          // 破裂で飛び散る破片 {angle, dist, maxDist, speed, size, splattered}
-  shardsSpawned: false, // 破片は柱の破裂タイミングで一度だけ生成する
+  debris: [], // 竜巻の中で渦を巻く粒 {angle, radius, angularSpeed, inwardSpeed, size}
 };
 
 // ダメージポップアップ: 参照動画のように、ダミーへのヒット時にダメージ量が
@@ -1726,15 +1717,46 @@ function activateSpecial(){
   player.spGauge = 0;
 }
 
+// 着弾時に地面へ焼き付ける「大きく丸い一枚のインク跡」。実機のトルネードの
+// 見た目(参照画像)に合わせ、中心の大きなブロブに数個の大きめブロブを
+// 少しずらして重ねることで、単発の円形splatよりもひと回り大きく・丸みの
+// ある一枚のインク跡に近づける(既存のpaintSplatClipped＝有機的なブロブ
+// 生成をそのまま流用しているので、質感は他の塗り跡と統一されている)。
+function paintTornadoLandingPatch(cx, cy){
+  const r = lines(TORNADO_STATS.splatRadiusLines);
+  paintSplatClipped(cx, cy, r * 1.2); // 中心の核
+  const extraCount = 5;
+  for (let i = 0; i < extraCount; i++){
+    const angle = (i / extraCount) * Math.PI * 2 + Math.random() * 0.6;
+    const dist = r * (0.35 + Math.random() * 0.35);
+    const ex = cx + Math.cos(angle) * dist;
+    const ey = cy + Math.sin(angle) * dist;
+    paintSplatClipped(ex, ey, r * (0.55 + Math.random() * 0.25));
+  }
+}
+
 function landTornado(){
   tornado.active = true;
   tornado.x = player.specialTargetX;
   tornado.y = player.specialTargetY;
   tornado.framesElapsed = 0;
-  tornado.shards = [];
-  tornado.shardsSpawned = false;
-  // 着弾時に周囲を一括で塗る(塗りptはトルネードの規定値60ptを上限とする)。
-  paintSplatClipped(tornado.x, tornado.y, lines(TORNADO_STATS.splatRadiusLines));
+  // 竜巻に巻き上げられて渦を巻く粒(見た目のみ)。地面のインク跡は下の
+  // paintTornadoLandingPatch()でこの時点で一度だけ確定させる — 竜巻が
+  // 展開している間、粒はその場でぐるぐる回り続けるだけで、追加でインクを
+  // 焼き付けたりはしない。
+  const baseR = lines(TORNADO_STATS.radiusLines);
+  tornado.debris = [];
+  const debrisCount = 9;
+  for (let i = 0; i < debrisCount; i++){
+    tornado.debris.push({
+      angle: Math.random() * Math.PI * 2,
+      radius: baseR * (0.3 + Math.random() * 0.8),
+      angularSpeed: 4 + Math.random() * 3,   // rad/秒(全粒同じ向きに回転させ、竜巻らしい一体感を出す)
+      inwardSpeed: baseR * (0.5 + Math.random() * 0.5), // px/秒(内側へ吸い込まれる速さ)
+      size: 2 + Math.random() * 3,
+    });
+  }
+  paintTornadoLandingPatch(tornado.x, tornado.y);
   creditCappedPaintPoints(TORNADO_STATS.paintPoints);
   // 着弾〜旋風が消えるまではスペシャルゲージが一切溜まらないペナルティ
   // タイム。burstVisualFrames(1s)を基準に使う。
@@ -1745,38 +1767,18 @@ function landTornado(){
 // (ダメージ判定90F)と進み、ダメージ判定が終わったら発動状態を解除する
 // (=構え固定・イカ化不能も解ける)。トルネードのダメージは着弾直後10.0/f
 // から1fごとに5/60ずつ減衰し、最小2.5/fに漸近する(90F持続)。
-// 柱が破裂するタイミング(TORNADO_STATS.burstVisualFrames到達時)に一度だけ
-// 破片を生成し、以後は毎フレーム外向きに飛ばして着地点へインクを焼き付ける
-// (=見た目の演出だが、paintSplatClippedは実際にcoverage/paintLayerへ描画
-// するため、着地点の面積は次のtickPaintPoints()で自動的に塗りpt/スペシャル
-// ゲージへ反映される)。
-function updateTornadoVisual(framesDelta){
-  if (!tornado.shardsSpawned && tornado.framesElapsed >= TORNADO_STATS.burstVisualFrames){
-    tornado.shardsSpawned = true;
-    const baseR = lines(TORNADO_STATS.radiusLines);
-    const shardCount = 12 + Math.floor(Math.random() * 6);
-    for (let i = 0; i < shardCount; i++){
-      tornado.shards.push({
-        angle: Math.random() * Math.PI * 2,
-        dist: baseR * (0.15 + Math.random() * 0.25),
-        maxDist: baseR * (1.3 + Math.random() * 1.5),
-        speed: baseR * (5.5 + Math.random() * 4.5), // px/秒
-        size: baseR * (0.10 + Math.random() * 0.14),
-        splattered: false,
-      });
-    }
-  }
-  if (tornado.shards.length){
-    const dt = framesDelta / FPS;
-    for (const s of tornado.shards){
-      if (s.splattered) continue;
-      s.dist += s.speed * dt;
-      if (s.dist >= s.maxDist){
-        s.splattered = true;
-        const sx = tornado.x + Math.cos(s.angle) * s.dist;
-        const sy = tornado.y + Math.sin(s.angle) * s.dist;
-        paintSplatClipped(sx, sy, s.size);
-      }
+// 竜巻の中で渦を巻く粒(debris)の角度・半径を毎フレーム更新する。見た目
+// だけの演出で、インクの追加描画は一切行わない(=地面の跡は着弾時に
+// paintTornadoLandingPatch()で確定済み)。中心へ近づきすぎたら外周へ
+// 再配置して、竜巻が展開している間ずっと渦が回り続けているように見せる。
+function updateTornadoDebris(dt){
+  const r = lines(TORNADO_STATS.radiusLines);
+  for (const d of tornado.debris){
+    d.angle += d.angularSpeed * dt;
+    d.radius -= d.inwardSpeed * dt;
+    if (d.radius < r * 0.12){
+      d.radius = r * (0.85 + Math.random() * 0.35);
+      d.angle = Math.random() * Math.PI * 2;
     }
   }
 }
@@ -1806,7 +1808,7 @@ function updateSpecial(dt){
 
   if (tornado.active){
     tornado.framesElapsed += framesDelta;
-    updateTornadoVisual(framesDelta);
+    updateTornadoDebris(dt);
     const distToDummy = Math.hypot(tornado.x - dummy.x, tornado.y - dummy.y);
     if (dummy.hp > 0 && distToDummy < dummy.radius + lines(TORNADO_STATS.radiusLines)){
       const raw = TORNADO_STATS.damageStart - TORNADO_STATS.damagePerFrameDecay * tornado.framesElapsed;
@@ -2497,87 +2499,64 @@ function render(){
     ctx.restore();
   }
 
-  // トルネード: 参照動画に合わせ、「地面から一気に伸び上がる柱→伸びきった
-  // まま持続→破裂して破片が飛び散る」という3段階の見た目にする(ダメージ
-  // 判定自体はupdateSpecial()側のTORNADO_STATS計算式そのままで、ここは
-  // 表示のみを担当する)。
+  // トルネード: 地面のインク跡は着弾時(landTornado())に一度だけ確定済み
+  // なので、ここでは発動中(ダメージ判定が続く間)だけ表示する「渦を巻く
+  // 竜巻」のエフェクトを描く。回転する渦の帯(アーム)＋中心の発光する目＋
+  // 渦に吸い込まれてぐるぐる回る粒(debris)の3要素で構成する。
   if (tornado.active){
     const r = lines(TORNADO_STATS.radiusLines);
-    const riseProgress = Math.min(1, tornado.framesElapsed / TORNADO_RISE_FRAMES); // 0→1: 伸び上がり
-    const burstProgress = tornado.framesElapsed <= TORNADO_STATS.burstVisualFrames
-      ? 0
-      : Math.min(1, (tornado.framesElapsed - TORNADO_STATS.burstVisualFrames) / TORNADO_BURST_SPREAD_FRAMES); // 0→1: 破裂して消える
-    const columnRadius = r * riseProgress * (1 - burstProgress * 0.55);
-    const columnAlpha = riseProgress * (1 - burstProgress);
+    const spinAngle = performance.now() / 110;
 
-    if (columnAlpha > 0.01){
-      ctx.save();
-      ctx.translate(tornado.x, tornado.y);
-      ctx.globalCompositeOperation = 'lighter';
+    ctx.save();
+    ctx.translate(tornado.x, tornado.y);
+    ctx.globalCompositeOperation = 'lighter';
 
-      // 外側のやわらかい発光(柱全体のハロー)
-      const outerGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, columnRadius * 1.4);
-      outerGrad.addColorStop(0, `rgba(255,235,140,${0.55 * columnAlpha})`);
-      outerGrad.addColorStop(0.6, `rgba(${TEAM_COLOR_RGB[0]},${TEAM_COLOR_RGB[1]},${TEAM_COLOR_RGB[2]},${0.4 * columnAlpha})`);
-      outerGrad.addColorStop(1, `rgba(${TEAM_COLOR_RGB[0]},${TEAM_COLOR_RGB[1]},${TEAM_COLOR_RGB[2]},0)`);
-      ctx.fillStyle = outerGrad;
+    // 渦を巻くインクの帯: 中心から外周へカーブしながら伸びる帯を数本、
+    // 同じ向きに回転させて竜巻らしい渦を表現する。
+    const armCount = 4;
+    for (let i = 0; i < armCount; i++){
+      const armBase = spinAngle + i * (Math.PI * 2 / armCount);
       ctx.beginPath();
-      ctx.arc(0, 0, columnRadius * 1.4, 0, Math.PI * 2);
-      ctx.fill();
-
-      // 柱本体: 参照動画に見えるような縦筋(ムラのある帯)をゆらめかせながら
-      // 何枚か重ねて、単なる円ではなく「柱」らしい質感を出す。
-      const streakCount = 10;
-      ctx.fillStyle = `rgba(255,224,120,${0.85 * columnAlpha})`;
-      for (let i = 0; i < streakCount; i++){
-        const a = (i / streakCount) * Math.PI * 2 + performance.now() / 900;
-        const wobble = Math.sin(performance.now() / 140 + i * 1.7) * columnRadius * 0.08;
-        const sx = Math.cos(a) * (columnRadius * 0.15);
-        const sy = Math.sin(a) * (columnRadius * 0.15);
-        ctx.beginPath();
-        ctx.ellipse(sx, sy, columnRadius * 0.5 + wobble, columnRadius * 0.11, a, 0, Math.PI * 2);
-        ctx.fill();
+      const segs = 14;
+      for (let s = 0; s <= segs; s++){
+        const t = s / segs;
+        const rad = r * (0.12 + t * 0.95);
+        const ang = armBase + t * 2.4; // カーブして渦を巻く
+        const px = Math.cos(ang) * rad;
+        const py = Math.sin(ang) * rad;
+        if (s === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
       }
-
-      // 中心の白い高輝度コア
-      const coreGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, columnRadius * 0.45);
-      coreGrad.addColorStop(0, `rgba(255,255,255,${0.9 * columnAlpha})`);
-      coreGrad.addColorStop(1, 'rgba(255,255,255,0)');
-      ctx.fillStyle = coreGrad;
-      ctx.beginPath();
-      ctx.arc(0, 0, columnRadius * 0.45, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.restore();
+      ctx.strokeStyle = 'rgba(255,224,120,0.5)';
+      ctx.lineWidth = Math.max(1, r * 0.12 * (1 - i * 0.12));
+      ctx.lineCap = 'round';
+      ctx.stroke();
     }
 
-    // 破裂の破片: 中心から鋭く飛び散るインク片。着地(splattered=true)する
-    // までの飛翔中だけここで描画し、着地後は既にcoverage/paintLayerへ
-    // 焼き付いた本物の塗りとして残るので、以降はこちらでは描かない。
-    if (tornado.shards.length){
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      for (const s of tornado.shards){
-        if (s.splattered) continue;
-        const sx = tornado.x + Math.cos(s.angle) * s.dist;
-        const sy = tornado.y + Math.sin(s.angle) * s.dist;
-        const trailX = tornado.x + Math.cos(s.angle) * s.dist * 0.75;
-        const trailY = tornado.y + Math.sin(s.angle) * s.dist * 0.75;
-        ctx.strokeStyle = 'rgba(255,224,120,0.85)';
-        ctx.lineWidth = Math.max(1, s.size * 0.6);
-        ctx.lineCap = 'round';
-        ctx.beginPath();
-        ctx.moveTo(trailX, trailY);
-        ctx.lineTo(sx, sy);
-        ctx.stroke();
-        ctx.fillStyle = 'rgba(255,255,255,0.95)';
-        ctx.beginPath();
-        ctx.arc(sx, sy, Math.max(1, s.size * 0.5), 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.restore();
+    // 中心の発光する目(アイ)
+    const eyeGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, r * 0.35);
+    eyeGrad.addColorStop(0, 'rgba(255,255,255,0.9)');
+    eyeGrad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = eyeGrad;
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.35, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.restore();
+
+    // 周回デブリ: 竜巻に巻き上げられて渦を巻きながら中心へ吸い込まれて
+    // いく粒(updateTornadoDebris()で角度・半径を更新)。
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = 'rgba(255,235,150,0.85)';
+    for (const d of tornado.debris){
+      const dx = tornado.x + Math.cos(d.angle) * d.radius;
+      const dy = tornado.y + Math.sin(d.angle) * d.radius;
+      ctx.beginPath();
+      ctx.arc(dx, dy, Math.max(1, d.size), 0, Math.PI * 2);
+      ctx.fill();
     }
+    ctx.restore();
 
     // 攻撃範囲の目安リング(ダメージ判定半径そのもの。薄く常時表示)
     ctx.save();
