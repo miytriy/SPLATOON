@@ -774,6 +774,9 @@ function switchWeapon(index){
   player.spLockedFramesLeft = 0;
   player.spGauge = 0;
   tornado.active = false;
+  tornado.shards = [];
+  tornado.shardsSpawned = false;
+  damagePopups.length = 0;
   updateWeaponDisplay();
   updateWeaponSwitchButtons();
   const chargeWrapEl = document.getElementById('charge-wrap');
@@ -969,6 +972,9 @@ function resetPaint(){
   player.spLockedFramesLeft = 0;
   quickBombs.length = 0;
   tornado.active = false;
+  tornado.shards = [];
+  tornado.shardsSpawned = false;
+  damagePopups.length = 0;
 }
 
 // デス(テスト用): このプロトタイプにはHP/被弾/デス判定が無いため、
@@ -1494,6 +1500,7 @@ function updateProjectiles(dt){
       const damage = getProjectileDamage(weapon, p.frameCount);
       if (dummy.firstHitAt === null) dummy.firstHitAt = performance.now();
       dummy.hp = Math.max(0, dummy.hp - damage);
+      spawnDamagePopup(dummy.x, dummy.y - dummy.radius - 16, damage);
       if (dummy.hp === 0){
         dummy.lastKillTimeText = ((performance.now() - dummy.firstHitAt) / 1000).toFixed(3) + '秒';
         setTimeout(respawnDummy, 500);
@@ -1592,6 +1599,7 @@ function explodeQuickBomb(bomb, x, y){
     if (dmg > 0){
       if (dummy.firstHitAt === null) dummy.firstHitAt = performance.now();
       dummy.hp = Math.max(0, dummy.hp - dmg);
+      spawnDamagePopup(dummy.x, dummy.y - dummy.radius - 16, dmg);
       if (dummy.hp === 0){
         dummy.lastKillTimeText = ((performance.now() - dummy.firstHitAt) / 1000).toFixed(3) + '秒';
         setTimeout(respawnDummy, 500);
@@ -1663,7 +1671,32 @@ function updateSubWeapon(dt){
 // も同じ増分を加える、addPaintPointsToSpGauge()参照)。トルネードの旋風が
 // 消えるまでの間(spLockedFramesLeft>0)はゲージ増加を止める。
 // ==========================================================================
-const tornado = { active: false, x: 0, y: 0, framesElapsed: 0 };
+// 柱の演出タイムライン（参照動画に合わせた見た目専用のフレーム区切り。
+// ダメージ判定自体はTORNADO_STATS.damageDurationFrames/damageStart等の
+// 既存ロジックのままで、ここは表示だけを制御する）:
+//   0〜TORNADO_RISE_FRAMES: 柱が地面から一気に伸び上がる(立ち上がり)
+//   〜TORNADO_STATS.burstVisualFrames: 伸びきった柱がそのまま持続(縦筋が
+//     ゆらめく)
+//   〜+TORNADO_BURST_SPREAD_FRAMES: 柱が破裂し、破片が周囲へ飛び散って
+//     着地点にインクを飛び散らせる(飛び散った破片は実際にcoverage/paint
+//     両レイヤーへ焼き付くので、見た目だけでなく塗り面積としても加算される)
+const TORNADO_RISE_FRAMES = 10;
+const TORNADO_BURST_SPREAD_FRAMES = 18;
+
+const tornado = {
+  active: false, x: 0, y: 0, framesElapsed: 0,
+  shards: [],          // 破裂で飛び散る破片 {angle, dist, maxDist, speed, size, splattered}
+  shardsSpawned: false, // 破片は柱の破裂タイミングで一度だけ生成する
+};
+
+// ダメージポップアップ: 参照動画のように、ダミーへのヒット時にダメージ量が
+// 数値としてふわっと浮かび上がって消えるHUD演出。見た目のみで判定には
+// 一切関与しない。
+const damagePopups = [];
+function spawnDamagePopup(x, y, amount){
+  if (amount <= 0) return;
+  damagePopups.push({ x, y, amount, bornAt: performance.now() });
+}
 
 // 塗りによるスコア増分delta(pt)をスペシャルゲージにも加算する共通ヘルパー。
 // spLockedFramesLeft中は加算しない(ペナルティタイム)。ゲージはspGaugeMaxで
@@ -1698,6 +1731,8 @@ function landTornado(){
   tornado.x = player.specialTargetX;
   tornado.y = player.specialTargetY;
   tornado.framesElapsed = 0;
+  tornado.shards = [];
+  tornado.shardsSpawned = false;
   // 着弾時に周囲を一括で塗る(塗りptはトルネードの規定値60ptを上限とする)。
   paintSplatClipped(tornado.x, tornado.y, lines(TORNADO_STATS.splatRadiusLines));
   creditCappedPaintPoints(TORNADO_STATS.paintPoints);
@@ -1710,6 +1745,42 @@ function landTornado(){
 // (ダメージ判定90F)と進み、ダメージ判定が終わったら発動状態を解除する
 // (=構え固定・イカ化不能も解ける)。トルネードのダメージは着弾直後10.0/f
 // から1fごとに5/60ずつ減衰し、最小2.5/fに漸近する(90F持続)。
+// 柱が破裂するタイミング(TORNADO_STATS.burstVisualFrames到達時)に一度だけ
+// 破片を生成し、以後は毎フレーム外向きに飛ばして着地点へインクを焼き付ける
+// (=見た目の演出だが、paintSplatClippedは実際にcoverage/paintLayerへ描画
+// するため、着地点の面積は次のtickPaintPoints()で自動的に塗りpt/スペシャル
+// ゲージへ反映される)。
+function updateTornadoVisual(framesDelta){
+  if (!tornado.shardsSpawned && tornado.framesElapsed >= TORNADO_STATS.burstVisualFrames){
+    tornado.shardsSpawned = true;
+    const baseR = lines(TORNADO_STATS.radiusLines);
+    const shardCount = 12 + Math.floor(Math.random() * 6);
+    for (let i = 0; i < shardCount; i++){
+      tornado.shards.push({
+        angle: Math.random() * Math.PI * 2,
+        dist: baseR * (0.15 + Math.random() * 0.25),
+        maxDist: baseR * (1.3 + Math.random() * 1.5),
+        speed: baseR * (5.5 + Math.random() * 4.5), // px/秒
+        size: baseR * (0.10 + Math.random() * 0.14),
+        splattered: false,
+      });
+    }
+  }
+  if (tornado.shards.length){
+    const dt = framesDelta / FPS;
+    for (const s of tornado.shards){
+      if (s.splattered) continue;
+      s.dist += s.speed * dt;
+      if (s.dist >= s.maxDist){
+        s.splattered = true;
+        const sx = tornado.x + Math.cos(s.angle) * s.dist;
+        const sy = tornado.y + Math.sin(s.angle) * s.dist;
+        paintSplatClipped(sx, sy, s.size);
+      }
+    }
+  }
+}
+
 function updateSpecial(dt){
   const framesDelta = dt * FPS;
 
@@ -1735,12 +1806,23 @@ function updateSpecial(dt){
 
   if (tornado.active){
     tornado.framesElapsed += framesDelta;
+    updateTornadoVisual(framesDelta);
     const distToDummy = Math.hypot(tornado.x - dummy.x, tornado.y - dummy.y);
     if (dummy.hp > 0 && distToDummy < dummy.radius + lines(TORNADO_STATS.radiusLines)){
       const raw = TORNADO_STATS.damageStart - TORNADO_STATS.damagePerFrameDecay * tornado.framesElapsed;
       const dmgPerFrame = Math.max(TORNADO_STATS.damageMin, raw);
+      const dmgThisTick = dmgPerFrame * framesDelta;
       if (dummy.firstHitAt === null) dummy.firstHitAt = performance.now();
-      dummy.hp = Math.max(0, dummy.hp - dmgPerFrame * framesDelta);
+      dummy.hp = Math.max(0, dummy.hp - dmgThisTick);
+      // 毎フレームpopupを出すと表示が埋め尽くされるので、6F(0.1秒)おきに
+      // その間の合計ダメージをまとめて1回だけ表示する。
+      tornado.popupAccum = (tornado.popupAccum || 0) + dmgThisTick;
+      tornado.popupFramesSince = (tornado.popupFramesSince || 0) + framesDelta;
+      if (tornado.popupFramesSince >= 6){
+        spawnDamagePopup(dummy.x, dummy.y - dummy.radius - 16, tornado.popupAccum);
+        tornado.popupAccum = 0;
+        tornado.popupFramesSince = 0;
+      }
       if (dummy.hp === 0){
         dummy.lastKillTimeText = ((performance.now() - dummy.firstHitAt) / 1000).toFixed(3) + '秒';
         setTimeout(respawnDummy, 500);
@@ -1911,6 +1993,7 @@ function fireChargerShot(){
     const damage = chargeLerpJump(weapon.damageNoCharge, weapon.damageHalfChargeMax, weapon.damageFull, frac);
     if (dummy.firstHitAt === null) dummy.firstHitAt = performance.now();
     dummy.hp = Math.max(0, dummy.hp - damage);
+    spawnDamagePopup(dummy.x, dummy.y - dummy.radius - 16, damage);
     if (dummy.hp === 0){
       dummy.lastKillTimeText = ((performance.now() - dummy.firstHitAt) / 1000).toFixed(3) + '秒';
       setTimeout(respawnDummy, 500);
@@ -2414,31 +2497,116 @@ function render(){
     ctx.restore();
   }
 
-  // トルネード: 展開中は回転するインクの旋風として描画する。
+  // トルネード: 参照動画に合わせ、「地面から一気に伸び上がる柱→伸びきった
+  // まま持続→破裂して破片が飛び散る」という3段階の見た目にする(ダメージ
+  // 判定自体はupdateSpecial()側のTORNADO_STATS計算式そのままで、ここは
+  // 表示のみを担当する)。
   if (tornado.active){
-    const life = 1 - Math.max(0, player.specialPhaseFramesLeft) / TORNADO_STATS.damageDurationFrames;
-    const spinAngle = performance.now() / 120;
     const r = lines(TORNADO_STATS.radiusLines);
-    ctx.save();
-    ctx.translate(tornado.x, tornado.y);
-    ctx.globalCompositeOperation = 'lighter';
-    for (let arm = 0; arm < 3; arm++){
-      const armAngle = spinAngle + arm * (Math.PI * 2 / 3);
-      const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
-      grad.addColorStop(0, `rgba(${TEAM_COLOR_RGB[0]},${TEAM_COLOR_RGB[1]},${TEAM_COLOR_RGB[2]},${0.5 * (1 - life)})`);
-      grad.addColorStop(1, `rgba(${TEAM_COLOR_RGB[0]},${TEAM_COLOR_RGB[1]},${TEAM_COLOR_RGB[2]},0)`);
-      ctx.fillStyle = grad;
+    const riseProgress = Math.min(1, tornado.framesElapsed / TORNADO_RISE_FRAMES); // 0→1: 伸び上がり
+    const burstProgress = tornado.framesElapsed <= TORNADO_STATS.burstVisualFrames
+      ? 0
+      : Math.min(1, (tornado.framesElapsed - TORNADO_STATS.burstVisualFrames) / TORNADO_BURST_SPREAD_FRAMES); // 0→1: 破裂して消える
+    const columnRadius = r * riseProgress * (1 - burstProgress * 0.55);
+    const columnAlpha = riseProgress * (1 - burstProgress);
+
+    if (columnAlpha > 0.01){
+      ctx.save();
+      ctx.translate(tornado.x, tornado.y);
+      ctx.globalCompositeOperation = 'lighter';
+
+      // 外側のやわらかい発光(柱全体のハロー)
+      const outerGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, columnRadius * 1.4);
+      outerGrad.addColorStop(0, `rgba(255,235,140,${0.55 * columnAlpha})`);
+      outerGrad.addColorStop(0.6, `rgba(${TEAM_COLOR_RGB[0]},${TEAM_COLOR_RGB[1]},${TEAM_COLOR_RGB[2]},${0.4 * columnAlpha})`);
+      outerGrad.addColorStop(1, `rgba(${TEAM_COLOR_RGB[0]},${TEAM_COLOR_RGB[1]},${TEAM_COLOR_RGB[2]},0)`);
+      ctx.fillStyle = outerGrad;
       ctx.beginPath();
-      ctx.ellipse(Math.cos(armAngle) * r * 0.4, Math.sin(armAngle) * r * 0.4, r * 0.55, r * 0.18, armAngle, 0, Math.PI * 2);
+      ctx.arc(0, 0, columnRadius * 1.4, 0, Math.PI * 2);
       ctx.fill();
+
+      // 柱本体: 参照動画に見えるような縦筋(ムラのある帯)をゆらめかせながら
+      // 何枚か重ねて、単なる円ではなく「柱」らしい質感を出す。
+      const streakCount = 10;
+      ctx.fillStyle = `rgba(255,224,120,${0.85 * columnAlpha})`;
+      for (let i = 0; i < streakCount; i++){
+        const a = (i / streakCount) * Math.PI * 2 + performance.now() / 900;
+        const wobble = Math.sin(performance.now() / 140 + i * 1.7) * columnRadius * 0.08;
+        const sx = Math.cos(a) * (columnRadius * 0.15);
+        const sy = Math.sin(a) * (columnRadius * 0.15);
+        ctx.beginPath();
+        ctx.ellipse(sx, sy, columnRadius * 0.5 + wobble, columnRadius * 0.11, a, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // 中心の白い高輝度コア
+      const coreGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, columnRadius * 0.45);
+      coreGrad.addColorStop(0, `rgba(255,255,255,${0.9 * columnAlpha})`);
+      coreGrad.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = coreGrad;
+      ctx.beginPath();
+      ctx.arc(0, 0, columnRadius * 0.45, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.restore();
     }
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-    ctx.lineWidth = 1.5;
+
+    // 破裂の破片: 中心から鋭く飛び散るインク片。着地(splattered=true)する
+    // までの飛翔中だけここで描画し、着地後は既にcoverage/paintLayerへ
+    // 焼き付いた本物の塗りとして残るので、以降はこちらでは描かない。
+    if (tornado.shards.length){
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      for (const s of tornado.shards){
+        if (s.splattered) continue;
+        const sx = tornado.x + Math.cos(s.angle) * s.dist;
+        const sy = tornado.y + Math.sin(s.angle) * s.dist;
+        const trailX = tornado.x + Math.cos(s.angle) * s.dist * 0.75;
+        const trailY = tornado.y + Math.sin(s.angle) * s.dist * 0.75;
+        ctx.strokeStyle = 'rgba(255,224,120,0.85)';
+        ctx.lineWidth = Math.max(1, s.size * 0.6);
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(trailX, trailY);
+        ctx.lineTo(sx, sy);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.beginPath();
+        ctx.arc(sx, sy, Math.max(1, s.size * 0.5), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // 攻撃範囲の目安リング(ダメージ判定半径そのもの。薄く常時表示)
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.arc(tornado.x, tornado.y, r, 0, Math.PI * 2);
     ctx.stroke();
     ctx.restore();
+  }
+
+  // ダメージポップアップ: ヒット時に浮かび上がって消える数値表示(見た目のみ)。
+  {
+    const nowPopup = performance.now();
+    const POPUP_LIFE_MS = 700;
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 13px sans-serif';
+    for (let i = damagePopups.length - 1; i >= 0; i--){
+      const p = damagePopups[i];
+      const age = nowPopup - p.bornAt;
+      if (age >= POPUP_LIFE_MS){ damagePopups.splice(i, 1); continue; }
+      const t = age / POPUP_LIFE_MS;
+      ctx.save();
+      ctx.globalAlpha = 1 - t;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(p.amount.toFixed(1), p.x, p.y - t * 26);
+      ctx.restore();
+    }
+    ctx.textAlign = 'start';
   }
 
   // チャージャーの光跡フラッシュ: 発射直後だけ明るく、150msでフェードアウト。
