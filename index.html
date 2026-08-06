@@ -1722,6 +1722,37 @@ function activateSpecial(){
 // 少しずらして重ねることで、単発の円形splatよりもひと回り大きく・丸みの
 // ある一枚のインク跡に近づける(既存のpaintSplatClipped＝有機的なブロブ
 // 生成をそのまま流用しているので、質感は他の塗り跡と統一されている)。
+// 渦を巻くインクの「羽根」1枚を描く。中心から外周に向かうほど角度が
+// 大きく巻き込み(curl)、かつ幅も広がる(widthOffset)ことで、単なる扇形
+// ではなく本物の渦潮・台風の目のような「うずまき」の腕の形になる。
+// source-overの通常合成で塗りつぶすので、発光エフェクトではなく実体の
+// あるインクの塊として見える。
+function drawInkLobe(angle, innerR, outerR, maxHalfWidthAngle, color, alpha){
+  ctx.beginPath();
+  const steps = 10;
+  for (let i = 0; i <= steps; i++){
+    const tt = i / steps;
+    const rad = innerR + (outerR - innerR) * tt;
+    const curl = tt * tt * (Math.PI * 0.55);
+    const a = angle + curl + maxHalfWidthAngle * tt;
+    const px = Math.cos(a) * rad, py = Math.sin(a) * rad;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  for (let i = steps; i >= 0; i--){
+    const tt = i / steps;
+    const rad = innerR + (outerR - innerR) * tt;
+    const curl = tt * tt * (Math.PI * 0.55);
+    const a = angle + curl - maxHalfWidthAngle * tt * 0.55;
+    const px = Math.cos(a) * rad, py = Math.sin(a) * rad;
+    ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.globalAlpha = alpha;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
 function paintTornadoLandingPatch(cx, cy){
   const r = lines(TORNADO_STATS.splatRadiusLines);
   paintSplatClipped(cx, cy, r * 1.2); // 中心の核
@@ -2500,67 +2531,71 @@ function render(){
   }
 
   // トルネード: 地面のインク跡は着弾時(landTornado())に一度だけ確定済み
-  // なので、ここでは発動中(ダメージ判定が続く間)だけ表示する「渦を巻く
-  // 竜巻」のエフェクトを描く。回転する渦の帯(アーム)＋中心の発光する目＋
-  // 渦に吸い込まれてぐるぐる回る粒(debris)の3要素で構成する。
+  // なので、ここでは発動中(ダメージ判定が続く間)だけ表示する「実体のある
+  // インクでできた渦」を描く。以前の版は発光する線とドット(lighter合成)で
+  // 「光のエフェクト」に見えてしまっていたため、通常合成(source-over)で
+  // 塗りつぶした渦巻き状のインクの塊に作り直した — 中心から外へ巻き込み
+  // ながら太くなる「羽根」を複数枚重ね、影側/明側の2色で立体感を出す。
   if (tornado.active){
     const r = lines(TORNADO_STATS.radiusLines);
-    const spinAngle = performance.now() / 110;
+    const nowT = performance.now();
+    const spin = nowT / 260; // ゆっくりめの自転(=太く重いインクの塊という質感)
 
     ctx.save();
     ctx.translate(tornado.x, tornado.y);
-    ctx.globalCompositeOperation = 'lighter';
 
-    // 渦を巻くインクの帯: 中心から外周へカーブしながら伸びる帯を数本、
-    // 同じ向きに回転させて竜巻らしい渦を表現する。
-    const armCount = 4;
-    for (let i = 0; i < armCount; i++){
-      const armBase = spinAngle + i * (Math.PI * 2 / armCount);
-      ctx.beginPath();
-      const segs = 14;
-      for (let s = 0; s <= segs; s++){
-        const t = s / segs;
-        const rad = r * (0.12 + t * 0.95);
-        const ang = armBase + t * 2.4; // カーブして渦を巻く
-        const px = Math.cos(ang) * rad;
-        const py = Math.sin(ang) * rad;
-        if (s === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-      }
-      ctx.strokeStyle = 'rgba(255,224,120,0.5)';
-      ctx.lineWidth = Math.max(1, r * 0.12 * (1 - i * 0.12));
-      ctx.lineCap = 'round';
-      ctx.stroke();
-    }
-
-    // 中心の発光する目(アイ)
-    const eyeGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, r * 0.35);
-    eyeGrad.addColorStop(0, 'rgba(255,255,255,0.9)');
-    eyeGrad.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = eyeGrad;
+    // 柱の足元の影: 実体が地面に接している存在感を出す薄い暗がり。
+    ctx.fillStyle = 'rgba(0,0,0,0.22)';
     ctx.beginPath();
-    ctx.arc(0, 0, r * 0.35, 0, Math.PI * 2);
+    ctx.ellipse(0, r * 0.1, r * 0.9, r * 0.34, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.globalCompositeOperation = 'source-over';
+    // 渦の羽根: 影側の暗いインク色を先に、明るいベース色を後に重ねることで
+    // 奥行きのある「渦を巻いてよじれ合うインクの塊」に見せる。
+    const lobeCount = 7;
+    for (let i = 0; i < lobeCount; i++){
+      const wobble = Math.sin(nowT / 480 + i * 1.3) * 0.10;
+      const baseAngle = (i / lobeCount) * Math.PI * 2;
+      const angle = spin + baseAngle;
+      const outerR = r * (0.95 + wobble);
+      const innerR = r * 0.08;
+      const halfWidth = 0.5 + wobble * 0.3;
+      const shade = i % 2 === 0 ? '#c8460f' : TEAM_COLOR; // 影色/ベース色を交互に
+      drawInkLobe(angle, innerR, outerR, halfWidth, shade, i % 2 === 0 ? 0.75 : 0.92);
+    }
+
+    // 渦の中心: えぐれてすり鉢状になった芯を明るいハイライトで表現する
+    // (発光ではなく、インクが薄く伸びて地の色が透けているイメージ)。
+    const coreGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, r * 0.3);
+    coreGrad.addColorStop(0, 'rgba(255,214,150,0.75)');
+    coreGrad.addColorStop(1, 'rgba(255,214,150,0)');
+    ctx.fillStyle = coreGrad;
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.3, 0, Math.PI * 2);
+    ctx.fill();
+
     ctx.restore();
 
-    // 周回デブリ: 竜巻に巻き上げられて渦を巻きながら中心へ吸い込まれて
-    // いく粒(updateTornadoDebris()で角度・半径を更新)。
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.fillStyle = 'rgba(255,235,150,0.85)';
+    // 周回デブリ: 渦に巻き上げられて飛び散るインクの滴。接線方向に伸ばした
+    // 楕円を塗りつぶしで描き、光の粒子ではなく粘度のあるインクの飛沫に
+    // 見せる(updateTornadoDebris()で角度・半径を更新)。
     for (const d of tornado.debris){
       const dx = tornado.x + Math.cos(d.angle) * d.radius;
       const dy = tornado.y + Math.sin(d.angle) * d.radius;
+      const tangent = d.angle + Math.PI / 2;
+      ctx.save();
+      ctx.translate(dx, dy);
+      ctx.rotate(tangent);
+      ctx.fillStyle = TEAM_COLOR;
       ctx.beginPath();
-      ctx.arc(dx, dy, Math.max(1, d.size), 0, Math.PI * 2);
+      ctx.ellipse(0, 0, d.size * 1.7, d.size * 0.7, 0, 0, Math.PI * 2);
       ctx.fill();
+      ctx.restore();
     }
-    ctx.restore();
 
     // 攻撃範囲の目安リング(ダメージ判定半径そのもの。薄く常時表示)
     ctx.save();
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.arc(tornado.x, tornado.y, r, 0, Math.PI * 2);
