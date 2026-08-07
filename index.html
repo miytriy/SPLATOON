@@ -775,6 +775,7 @@ function switchWeapon(index){
   player.spGauge = 0;
   tornado.active = false;
   tornado.debris = [];
+  tornado.crownLayers = [];
   damagePopups.length = 0;
   updateWeaponDisplay();
   updateWeaponSwitchButtons();
@@ -972,6 +973,7 @@ function resetPaint(){
   quickBombs.length = 0;
   tornado.active = false;
   tornado.debris = [];
+  tornado.crownLayers = [];
   damagePopups.length = 0;
 }
 
@@ -1677,7 +1679,8 @@ function updateSubWeapon(dt){
 // (地面のインク跡は着弾時に一度だけ確定して焼き付く)。
 const tornado = {
   active: false, x: 0, y: 0, framesElapsed: 0,
-  debris: [], // 竜巻の中で渦を巻く粒 {angle, radius, angularSpeed, inwardSpeed, size}
+  debris: [],       // 竜巻の中で渦を巻く粒 {angle, radius, angularSpeed, inwardSpeed, size}
+  crownLayers: [],  // 柱を構成するギザギザの結晶状クラウン層 {spikes, radiusFactor, rotSpeed, alpha, dark}
 };
 
 // ダメージポップアップ: 参照動画のように、ダミーへのヒット時にダメージ量が
@@ -1727,24 +1730,22 @@ function activateSpecial(){
 // ではなく本物の渦潮・台風の目のような「うずまき」の腕の形になる。
 // source-overの通常合成で塗りつぶすので、発光エフェクトではなく実体の
 // あるインクの塊として見える。
-function drawInkLobe(angle, innerR, outerR, maxHalfWidthAngle, color, alpha){
+// 参照動画の「柱の根本を取り巻くギザギザの結晶状の房飾り」を再現する
+// パーツ。滑らかな曲線ではなく、外周⇄内周を直線でジグザグに結んだ
+// 星形(クラウン状)のポリゴンを描く — これが柱の断面を上から見たときの
+// 「尖った房飾りが幾重にも重なった」faceted(多面体)な質感になる。
+// spikesは{outerJitter, innerJitter}の固定配列(tornado生成時に一度だけ
+// 乱数で決めたもの)を渡すことで、毎フレーム形が変わってチラつくのを防ぎ
+// ながら、回転(rotation)だけで動きを出す。
+function drawCrownRing(spikes, rotation, outerR, innerR, color, alpha){
+  const n = spikes.length;
   ctx.beginPath();
-  const steps = 10;
-  for (let i = 0; i <= steps; i++){
-    const tt = i / steps;
-    const rad = innerR + (outerR - innerR) * tt;
-    const curl = tt * tt * (Math.PI * 0.55);
-    const a = angle + curl + maxHalfWidthAngle * tt;
-    const px = Math.cos(a) * rad, py = Math.sin(a) * rad;
+  for (let i = 0; i < n * 2; i++){
+    const spike = spikes[Math.floor(i / 2)];
+    const angle = rotation + (i / (n * 2)) * Math.PI * 2;
+    const rad = (i % 2 === 0) ? outerR * spike.outerJitter : innerR * spike.innerJitter;
+    const px = Math.cos(angle) * rad, py = Math.sin(angle) * rad;
     if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-  }
-  for (let i = steps; i >= 0; i--){
-    const tt = i / steps;
-    const rad = innerR + (outerR - innerR) * tt;
-    const curl = tt * tt * (Math.PI * 0.55);
-    const a = angle + curl - maxHalfWidthAngle * tt * 0.55;
-    const px = Math.cos(a) * rad, py = Math.sin(a) * rad;
-    ctx.lineTo(px, py);
   }
   ctx.closePath();
   ctx.fillStyle = color;
@@ -1785,6 +1786,30 @@ function landTornado(){
       angularSpeed: 4 + Math.random() * 3,   // rad/秒(全粒同じ向きに回転させ、竜巻らしい一体感を出す)
       inwardSpeed: baseR * (0.5 + Math.random() * 0.5), // px/秒(内側へ吸い込まれる速さ)
       size: 2 + Math.random() * 3,
+    });
+  }
+  // 柱を上から見た断面として、ギザギザの結晶状クラウンを複数層重ねる。
+  // 各層のスパイク形状(outerJitter/innerJitter)はここで一度だけ乱数生成し
+  // 固定する — 毎フレーム作り直すとチラついて「わざとらしく」見えるため、
+  // 動きは回転(render側でrotation角度を進めるだけ)に限定する。層ごとに
+  // 半径・回転速度・色を変えて、幾重にも重なる房飾りのような質感を出す。
+  tornado.crownLayers = [];
+  const layerCount = 4;
+  for (let L = 0; L < layerCount; L++){
+    const spikeCount = 8 + Math.floor(Math.random() * 4);
+    const spikes = [];
+    for (let i = 0; i < spikeCount; i++){
+      spikes.push({
+        outerJitter: 0.72 + Math.random() * 0.5,
+        innerJitter: 0.7 + Math.random() * 0.3,
+      });
+    }
+    tornado.crownLayers.push({
+      spikes,
+      radiusFactor: 0.42 + L * 0.19, // 内側の層ほど小さく、外側ほど大きい
+      rotSpeed: 0.55 + L * 0.28,     // 層ごとに回転速度を変えて「よじれ」を出す
+      alpha: 0.9 - L * 0.14,
+      dark: L % 2 === 1,             // 交互に影色を挟んで多面体らしい陰影を作る
     });
   }
   paintTornadoLandingPatch(tornado.x, tornado.y);
@@ -2531,15 +2556,15 @@ function render(){
   }
 
   // トルネード: 地面のインク跡は着弾時(landTornado())に一度だけ確定済み
-  // なので、ここでは発動中(ダメージ判定が続く間)だけ表示する「実体のある
-  // インクでできた渦」を描く。以前の版は発光する線とドット(lighter合成)で
-  // 「光のエフェクト」に見えてしまっていたため、通常合成(source-over)で
-  // 塗りつぶした渦巻き状のインクの塊に作り直した — 中心から外へ巻き込み
-  // ながら太くなる「羽根」を複数枚重ね、影側/明側の2色で立体感を出す。
+  // なので、ここでは発動中(ダメージ判定が続く間)だけ表示する「柱状の
+  // 竜巻」を描く。参照動画のように、滑らかな曲線ではなくギザギザした
+  // 結晶(faceted)なクラウン状のインクの房を複数層重ね、層ごとに回転速度を
+  // 変えることで「よじれながら立ち上る柱」に見せる(発光のlighter合成は
+  // 使わず、通常合成の塗りつぶしで実体感を出す)。
   if (tornado.active){
     const r = lines(TORNADO_STATS.radiusLines);
     const nowT = performance.now();
-    const spin = nowT / 260; // ゆっくりめの自転(=太く重いインクの塊という質感)
+    const spinBase = nowT / 900; // ラジアン基準のゆっくりした自転(=重量感)
 
     ctx.save();
     ctx.translate(tornado.x, tornado.y);
@@ -2547,38 +2572,35 @@ function render(){
     // 柱の足元の影: 実体が地面に接している存在感を出す薄い暗がり。
     ctx.fillStyle = 'rgba(0,0,0,0.22)';
     ctx.beginPath();
-    ctx.ellipse(0, r * 0.1, r * 0.9, r * 0.34, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, r * 0.1, r * 1.05, r * 0.4, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // 渦の羽根: 影側の暗いインク色を先に、明るいベース色を後に重ねることで
-    // 奥行きのある「渦を巻いてよじれ合うインクの塊」に見せる。
-    const lobeCount = 7;
-    for (let i = 0; i < lobeCount; i++){
-      const wobble = Math.sin(nowT / 480 + i * 1.3) * 0.10;
-      const baseAngle = (i / lobeCount) * Math.PI * 2;
-      const angle = spin + baseAngle;
-      const outerR = r * (0.95 + wobble);
-      const innerR = r * 0.08;
-      const halfWidth = 0.5 + wobble * 0.3;
-      const shade = i % 2 === 0 ? '#c8460f' : TEAM_COLOR; // 影色/ベース色を交互に
-      drawInkLobe(angle, innerR, outerR, halfWidth, shade, i % 2 === 0 ? 0.75 : 0.92);
+    // クラウン層: 内側(小さい・速い回転)から外側(大きい・遅い回転)へ
+    // 順に重ねる。差動回転(層ごとに速度が違う)にすることで、単一の
+    // 回転体ではなく「よじれ合う房飾りが幾重にも重なった柱」に見える。
+    for (const layer of tornado.crownLayers){
+      const outerR = r * layer.radiusFactor;
+      const innerR = outerR * 0.5;
+      const rotation = spinBase * layer.rotSpeed;
+      const color = layer.dark ? '#c8460f' : TEAM_COLOR;
+      drawCrownRing(layer.spikes, rotation, outerR, innerR, color, layer.alpha);
     }
 
-    // 渦の中心: えぐれてすり鉢状になった芯を明るいハイライトで表現する
-    // (発光ではなく、インクが薄く伸びて地の色が透けているイメージ)。
-    const coreGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, r * 0.3);
-    coreGrad.addColorStop(0, 'rgba(255,214,150,0.75)');
-    coreGrad.addColorStop(1, 'rgba(255,214,150,0)');
+    // 柱の芯: 中心が最も明るく見えるハイライト(発光ではなく、インクが
+    // 薄く伸びて光を通しているイメージ)。
+    const coreGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, r * 0.32);
+    coreGrad.addColorStop(0, 'rgba(255,224,170,0.85)');
+    coreGrad.addColorStop(1, 'rgba(255,224,170,0)');
     ctx.fillStyle = coreGrad;
     ctx.beginPath();
-    ctx.arc(0, 0, r * 0.3, 0, Math.PI * 2);
+    ctx.arc(0, 0, r * 0.32, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.restore();
 
-    // 周回デブリ: 渦に巻き上げられて飛び散るインクの滴。接線方向に伸ばした
-    // 楕円を塗りつぶしで描き、光の粒子ではなく粘度のあるインクの飛沫に
-    // 見せる(updateTornadoDebris()で角度・半径を更新)。
+    // 周回デブリ: 柱の房から千切れて飛び散る、鋭く尖ったインクの破片。
+    // 楕円ではなく細い三角(kite)形にすることで、参照動画に見える
+    // 「柱の縁から飛ぶ薄い破片」の質感に近づける。
     for (const d of tornado.debris){
       const dx = tornado.x + Math.cos(d.angle) * d.radius;
       const dy = tornado.y + Math.sin(d.angle) * d.radius;
@@ -2588,7 +2610,11 @@ function render(){
       ctx.rotate(tangent);
       ctx.fillStyle = TEAM_COLOR;
       ctx.beginPath();
-      ctx.ellipse(0, 0, d.size * 1.7, d.size * 0.7, 0, 0, Math.PI * 2);
+      ctx.moveTo(-d.size * 2.2, 0);
+      ctx.lineTo(d.size * 0.8, -d.size * 0.9);
+      ctx.lineTo(d.size * 1.6, 0);
+      ctx.lineTo(d.size * 0.8, d.size * 0.9);
+      ctx.closePath();
       ctx.fill();
       ctx.restore();
     }
